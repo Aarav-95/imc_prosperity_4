@@ -1,0 +1,1308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IMC Prosperity — Market Dashboard</title>
+    <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+    <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0e17;
+            --bg-secondary: #111827;
+            --bg-tertiary: #1a2235;
+            --bg-card: #151c2c;
+            --border: #1e2a3a;
+            --border-hover: #2d3f56;
+            --text-primary: #e8edf5;
+            --text-secondary: #8892a4;
+            --text-muted: #4a5568;
+            --accent: #3b82f6;
+            --accent-hover: #60a5fa;
+            --accent-glow: rgba(59, 130, 246, 0.15);
+            --green: #22c55e;
+            --green-dim: rgba(34, 197, 94, 0.15);
+            --red: #ef4444;
+            --red-dim: rgba(239, 68, 68, 0.15);
+            --yellow: #eab308;
+            --purple: #a855f7;
+            --chart-bg: #0d1117;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            overflow-x: hidden;
+            min-height: 100vh;
+        }
+
+        /* ── Header ── */
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 24px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            backdrop-filter: blur(12px);
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .logo {
+            font-size: 18px;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent), var(--purple));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -0.5px;
+        }
+
+        .logo-sub {
+            font-size: 11px;
+            color: var(--text-muted);
+            font-weight: 400;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+        }
+
+        .header-center {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        /* ── Product Tabs ── */
+        .product-tab {
+            padding: 6px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            border: 1px solid var(--border);
+            background: transparent;
+            color: var(--text-secondary);
+            transition: all 0.2s ease;
+        }
+
+        .product-tab:hover {
+            border-color: var(--border-hover);
+            color: var(--text-primary);
+        }
+
+        .product-tab.active {
+            background: var(--accent-glow);
+            border-color: var(--accent);
+            color: var(--accent-hover);
+        }
+
+        /* ── Day / Interval Selectors ── */
+        .selector {
+            display: flex;
+            align-items: center;
+            gap: 2px;
+            background: var(--bg-tertiary);
+            border-radius: 6px;
+            padding: 2px;
+            border: 1px solid var(--border);
+        }
+
+        .selector-btn {
+            padding: 5px 12px;
+            border: none;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            background: transparent;
+            color: var(--text-secondary);
+            font-family: 'Inter', sans-serif;
+            transition: all 0.15s ease;
+        }
+
+        .selector-btn:hover {
+            color: var(--text-primary);
+        }
+
+        .selector-btn.active {
+            background: var(--accent);
+            color: #fff;
+            box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+        }
+
+        /* ── Info Bar ── */
+        .info-bar {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            padding: 8px 24px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            font-size: 12px;
+        }
+
+        .info-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .info-label {
+            color: var(--text-muted);
+            font-weight: 400;
+        }
+
+        .info-value {
+            color: var(--text-primary);
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .info-value.positive { color: var(--green); }
+        .info-value.negative { color: var(--red); }
+
+        /* ── Chart Container ── */
+        .charts-wrapper {
+            padding: 16px 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .chart-panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .chart-panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 16px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .chart-panel-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+
+        .chart-container {
+            width: 100%;
+        }
+
+        /* ── Order Book Panel ── */
+        .bottom-panels {
+            display: grid;
+            grid-template-columns: 300px 1fr;
+            gap: 12px;
+            padding: 0 24px 24px;
+        }
+
+        .order-book {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .order-book-header {
+            padding: 10px 16px;
+            border-bottom: 1px solid var(--border);
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+
+        .order-book-content {
+            padding: 8px 0;
+        }
+
+        .ob-header-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            padding: 4px 16px;
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .ob-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            padding: 3px 16px;
+            font-size: 12px;
+            font-variant-numeric: tabular-nums;
+            position: relative;
+        }
+
+        .ob-row .price { font-weight: 500; }
+        .ob-row.ask .price { color: var(--red); }
+        .ob-row.bid .price { color: var(--green); }
+        .ob-row .volume { color: var(--text-secondary); text-align: right; }
+        .ob-row .total { color: var(--text-muted); text-align: right; }
+
+        .ob-row .depth-bar {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            right: 0;
+            opacity: 0.08;
+        }
+
+        .ob-row.ask .depth-bar { background: var(--red); }
+        .ob-row.bid .depth-bar { background: var(--green); }
+
+        .ob-spread {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 6px 16px;
+            font-size: 11px;
+            color: var(--text-muted);
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            gap: 8px;
+        }
+
+        .ob-spread-val {
+            color: var(--yellow);
+            font-weight: 600;
+        }
+
+        /* ── Trades Panel ── */
+        .trades-panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .trades-header {
+            padding: 10px 16px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .trades-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+        }
+
+        .trades-table {
+            width: 100%;
+            font-size: 12px;
+            border-collapse: collapse;
+        }
+
+        .trades-table th {
+            padding: 8px 16px;
+            text-align: left;
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .trades-table td {
+            padding: 6px 16px;
+            font-variant-numeric: tabular-nums;
+            color: var(--text-secondary);
+            border-bottom: 1px solid rgba(30, 42, 58, 0.5);
+        }
+
+        .trades-table tr:hover td {
+            background: rgba(59, 130, 246, 0.03);
+        }
+
+        .trades-scroll {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .trades-scroll::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .trades-scroll::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .trades-scroll::-webkit-scrollbar-thumb {
+            background: var(--border);
+            border-radius: 3px;
+        }
+
+        /* ── File Drop Zone ── */
+        .drop-zone {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(10, 14, 23, 0.92);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+            backdrop-filter: blur(6px);
+        }
+
+        .drop-zone.active {
+            display: flex;
+        }
+
+        .drop-zone-inner {
+            border: 2px dashed var(--accent);
+            border-radius: 16px;
+            padding: 60px 80px;
+            text-align: center;
+            background: var(--accent-glow);
+        }
+
+        .drop-zone-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+
+        .drop-zone-text {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--accent-hover);
+        }
+
+        .drop-zone-sub {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-top: 8px;
+        }
+
+        /* ── Loading ── */
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: var(--bg-primary);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 10000;
+            transition: opacity 0.4s ease;
+        }
+
+        .loading-overlay.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .loading-text {
+            margin-top: 16px;
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+
+        /* ── File Manager Button ── */
+        .file-btn {
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            border: 1px solid var(--border);
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+            font-family: 'Inter', sans-serif;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .file-btn:hover {
+            border-color: var(--accent);
+            color: var(--accent-hover);
+        }
+
+        /* ── Tooltip ── */
+        .chart-tooltip {
+            position: absolute;
+            top: 50px;
+            left: 16px;
+            font-size: 12px;
+            z-index: 10;
+            pointer-events: none;
+        }
+
+        .tooltip-row {
+            display: flex;
+            gap: 12px;
+            line-height: 1.6;
+        }
+
+        .tooltip-label {
+            color: var(--text-muted);
+            min-width: 20px;
+        }
+
+        .tooltip-value {
+            color: var(--text-primary);
+            font-weight: 500;
+            font-variant-numeric: tabular-nums;
+        }
+
+        /* ── Responsive ── */
+        @media (max-width: 900px) {
+            .bottom-panels {
+                grid-template-columns: 1fr;
+            }
+            .header {
+                flex-wrap: wrap;
+                gap: 8px;
+            }
+        }
+    </style>
+</head>
+<body>
+
+<!-- Loading Overlay -->
+<div class="loading-overlay" id="loadingOverlay">
+    <div class="spinner"></div>
+    <div class="loading-text">Loading market data…</div>
+</div>
+
+<!-- Drag & Drop Zone -->
+<div class="drop-zone" id="dropZone">
+    <div class="drop-zone-inner">
+        <div class="drop-zone-icon">📂</div>
+        <div class="drop-zone-text">Drop CSV files here</div>
+        <div class="drop-zone-sub">Supports prices_*.csv and trades_*.csv</div>
+    </div>
+</div>
+
+<!-- Header -->
+<div class="header">
+    <div class="header-left">
+        <div>
+            <div class="logo">IMC Prosperity</div>
+            <div class="logo-sub">Market Dashboard</div>
+        </div>
+    </div>
+    <div class="header-center">
+        <div id="productTabs" class="selector"></div>
+        <div style="width: 12px;"></div>
+        <div id="dayTabs" class="selector"></div>
+    </div>
+    <div class="header-right">
+        <div id="intervalTabs" class="selector"></div>
+        <button class="file-btn" onclick="document.getElementById('fileInput').click()">
+            <span>＋</span> Add Data
+        </button>
+        <input type="file" id="fileInput" accept=".csv" multiple style="display:none" onchange="handleFileInput(event)">
+    </div>
+</div>
+
+<!-- Info Bar -->
+<div class="info-bar" id="infoBar">
+    <div class="info-item">
+        <span class="info-label">Mid Price</span>
+        <span class="info-value" id="infoMid">—</span>
+    </div>
+    <div class="info-item">
+        <span class="info-label">Open</span>
+        <span class="info-value" id="infoOpen">—</span>
+    </div>
+    <div class="info-item">
+        <span class="info-label">High</span>
+        <span class="info-value" id="infoHigh">—</span>
+    </div>
+    <div class="info-item">
+        <span class="info-label">Low</span>
+        <span class="info-value" id="infoLow">—</span>
+    </div>
+    <div class="info-item">
+        <span class="info-label">Spread</span>
+        <span class="info-value" id="infoSpread">—</span>
+    </div>
+    <div class="info-item">
+        <span class="info-label">P&L</span>
+        <span class="info-value" id="infoPnL">—</span>
+    </div>
+    <div class="info-item">
+        <span class="info-label">Trades</span>
+        <span class="info-value" id="infoTrades">—</span>
+    </div>
+</div>
+
+<!-- Charts -->
+<div class="charts-wrapper">
+    <!-- Price Chart -->
+    <div class="chart-panel">
+        <div class="chart-panel-header">
+            <span class="chart-panel-title" id="priceChartTitle">Price — OHLC</span>
+        </div>
+        <div class="chart-container" id="priceChart" style="height: 420px;"></div>
+    </div>
+
+    <!-- Volume Chart -->
+    <div class="chart-panel">
+        <div class="chart-panel-header">
+            <span class="chart-panel-title">Volume</span>
+        </div>
+        <div class="chart-container" id="volumeChart" style="height: 140px;"></div>
+    </div>
+
+    <!-- P&L Chart -->
+    <div class="chart-panel">
+        <div class="chart-panel-header">
+            <span class="chart-panel-title">Profit & Loss</span>
+        </div>
+        <div class="chart-container" id="pnlChart" style="height: 160px;"></div>
+    </div>
+
+    <!-- Spread Chart -->
+    <div class="chart-panel">
+        <div class="chart-panel-header">
+            <span class="chart-panel-title">Bid-Ask Spread</span>
+        </div>
+        <div class="chart-container" id="spreadChart" style="height: 140px;"></div>
+    </div>
+</div>
+
+<!-- Bottom Panels -->
+<div class="bottom-panels">
+    <!-- Order Book -->
+    <div class="order-book">
+        <div class="order-book-header">Order Book (snapshot)</div>
+        <div class="order-book-content" id="orderBookContent">
+            <div style="padding: 24px; text-align: center; color: var(--text-muted); font-size: 12px;">
+                Hover over the price chart to view order book
+            </div>
+        </div>
+    </div>
+
+    <!-- Trades Table -->
+    <div class="trades-panel">
+        <div class="trades-header">
+            <span class="trades-title">Market Trades</span>
+            <span id="tradeCount" style="font-size: 11px; color: var(--text-muted);"></span>
+        </div>
+        <div class="trades-scroll" id="tradesScroll">
+            <table class="trades-table">
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Price</th>
+                        <th>Qty</th>
+                        <th>Buyer</th>
+                        <th>Seller</th>
+                        <th>Value</th>
+                    </tr>
+                </thead>
+                <tbody id="tradesBody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+// ─── State ───────────────────────────────────────────────
+const state = {
+    priceData: {},   // { "round_0_day_-1": [...] }
+    tradeData: {},   // { "round_0_day_-1": [...] }
+    products: new Set(),
+    days: new Set(),
+    currentProduct: null,
+    currentDay: null,
+    currentInterval: 5000, // 5s default
+};
+
+const intervals = [
+    { label: '1s', ms: 1000 },
+    { label: '5s', ms: 5000 },
+    { label: '15s', ms: 15000 },
+    { label: '30s', ms: 30000 },
+    { label: '1m', ms: 60000 },
+];
+
+let priceChart, volumeChart, pnlChart, spreadChart;
+let candleSeries, volumeSeries, pnlSeries, spreadSeries, trademarkerSeries;
+let bidLineSeries, askLineSeries;
+
+// ─── Chart Setup ─────────────────────────────────────────
+function createCharts() {
+    const commonOpts = {
+        layout: {
+            background: { color: '#0d1117' },
+            textColor: '#8892a4',
+            fontFamily: 'Inter, sans-serif',
+            fontSize: 11,
+        },
+        grid: {
+            vertLines: { color: 'rgba(30, 42, 58, 0.5)' },
+            horzLines: { color: 'rgba(30, 42, 58, 0.5)' },
+        },
+        crosshair: {
+            mode: LightweightCharts.CrosshairMode.Normal,
+            vertLine: {
+                color: 'rgba(59, 130, 246, 0.3)',
+                style: LightweightCharts.LineStyle.Dashed,
+                labelBackgroundColor: '#3b82f6',
+            },
+            horzLine: {
+                color: 'rgba(59, 130, 246, 0.3)',
+                style: LightweightCharts.LineStyle.Dashed,
+                labelBackgroundColor: '#3b82f6',
+            },
+        },
+        timeScale: {
+            borderColor: '#1e2a3a',
+            timeVisible: true,
+            secondsVisible: true,
+        },
+        rightPriceScale: {
+            borderColor: '#1e2a3a',
+        },
+        handleScroll: { vertTouchDrag: false },
+    };
+
+    // Price chart
+    priceChart = LightweightCharts.createChart(
+        document.getElementById('priceChart'), { ...commonOpts }
+    );
+
+    candleSeries = priceChart.addCandlestickSeries({
+        upColor: '#22c55e',
+        downColor: '#ef4444',
+        borderUpColor: '#22c55e',
+        borderDownColor: '#ef4444',
+        wickUpColor: '#22c55e80',
+        wickDownColor: '#ef444480',
+    });
+
+    bidLineSeries = priceChart.addLineSeries({
+        color: 'rgba(34, 197, 94, 0.35)',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+    });
+
+    askLineSeries = priceChart.addLineSeries({
+        color: 'rgba(239, 68, 68, 0.35)',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+    });
+
+    // Volume chart
+    volumeChart = LightweightCharts.createChart(
+        document.getElementById('volumeChart'), {
+            ...commonOpts,
+            rightPriceScale: { ...commonOpts.rightPriceScale, scaleMargins: { top: 0.1, bottom: 0 } },
+        }
+    );
+
+    volumeSeries = volumeChart.addHistogramSeries({
+        priceFormat: { type: 'volume' },
+        priceScaleId: '',
+    });
+
+    // P&L chart
+    pnlChart = LightweightCharts.createChart(
+        document.getElementById('pnlChart'), commonOpts
+    );
+
+    pnlSeries = pnlChart.addAreaSeries({
+        topColor: 'rgba(59, 130, 246, 0.25)',
+        bottomColor: 'rgba(59, 130, 246, 0.02)',
+        lineColor: '#3b82f6',
+        lineWidth: 2,
+        priceLineVisible: false,
+        crosshairMarkerRadius: 4,
+    });
+
+    // Spread chart
+    spreadChart = LightweightCharts.createChart(
+        document.getElementById('spreadChart'), commonOpts
+    );
+
+    spreadSeries = spreadChart.addAreaSeries({
+        topColor: 'rgba(234, 179, 8, 0.2)',
+        bottomColor: 'rgba(234, 179, 8, 0.02)',
+        lineColor: '#eab308',
+        lineWidth: 1.5,
+        priceLineVisible: false,
+        crosshairMarkerRadius: 3,
+    });
+
+    // Sync crosshairs
+    syncCharts([priceChart, volumeChart, pnlChart, spreadChart]);
+
+    // Crosshair move for order book
+    priceChart.subscribeCrosshairMove(handleCrosshairMove);
+}
+
+function syncCharts(charts) {
+    charts.forEach((chart, i) => {
+        chart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+            if (range) {
+                charts.forEach((other, j) => {
+                    if (i !== j) other.timeScale().setVisibleLogicalRange(range);
+                });
+            }
+        });
+    });
+}
+
+// ─── Data Loading ────────────────────────────────────────
+function parseCSVFile(file) {
+    return new Promise((resolve) => {
+        Papa.parse(file, {
+            delimiter: ';',
+            header: true,
+            dynamicTyping: true,
+            skipEmptyLines: true,
+            complete: (result) => resolve(result.data),
+        });
+    });
+}
+
+function extractDayKey(filename) {
+    // e.g. "prices_round_0_day_-1.csv" → "round_0_day_-1"
+    const m = filename.match(/(round_\d+_day_-?\d+)/);
+    return m ? m[1] : filename;
+}
+
+function extractDayLabel(key) {
+    const m = key.match(/day_(-?\d+)/);
+    return m ? `Day ${m[1]}` : key;
+}
+
+
+
+function processFileData(filename, data) {
+    const dayKey = extractDayKey(filename);
+
+    if (filename.startsWith('prices')) {
+        if (!state.priceData[dayKey]) state.priceData[dayKey] = [];
+        state.priceData[dayKey].push(...data);
+        data.forEach(row => {
+            if (row.product) state.products.add(row.product);
+        });
+        state.days.add(dayKey);
+    } else if (filename.startsWith('trades')) {
+        if (!state.tradeData[dayKey]) state.tradeData[dayKey] = [];
+        state.tradeData[dayKey].push(...data);
+        // Also register days and products from trade files
+        data.forEach(row => {
+            const sym = row.symbol || row.product;
+            if (sym) state.products.add(sym);
+        });
+        state.days.add(dayKey);
+    }
+}
+
+// ─── File Drop / Input ───────────────────────────────────
+function setupDragDrop() {
+    const dz = document.getElementById('dropZone');
+
+    document.addEventListener('dragenter', (e) => {
+        e.preventDefault();
+        dz.classList.add('active');
+    });
+    dz.addEventListener('dragleave', (e) => {
+        if (e.target === dz) dz.classList.remove('active');
+    });
+    dz.addEventListener('dragover', (e) => e.preventDefault());
+    dz.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        dz.classList.remove('active');
+        const files = [...e.dataTransfer.files].filter(f => f.name.endsWith('.csv'));
+        for (const file of files) {
+            const data = await parseCSVFile(file);
+            processFileData(file.name, data);
+        }
+        rebuildUI();
+        renderAll();
+    });
+}
+
+async function handleFileInput(e) {
+    const files = [...e.target.files].filter(f => f.name.endsWith('.csv'));
+    for (const file of files) {
+        const data = await parseCSVFile(file);
+        processFileData(file.name, data);
+    }
+    rebuildUI();
+    renderAll();
+    e.target.value = '';
+}
+
+// ─── UI Building ─────────────────────────────────────────
+function rebuildUI() {
+    // Product tabs
+    const ptabs = document.getElementById('productTabs');
+    ptabs.innerHTML = '';
+    const products = [...state.products].sort();
+    products.forEach(p => {
+        const btn = document.createElement('button');
+        btn.className = 'selector-btn' + (p === state.currentProduct ? ' active' : '');
+        btn.textContent = p;
+        btn.onclick = () => { state.currentProduct = p; rebuildUI(); renderAll(); };
+        ptabs.appendChild(btn);
+    });
+
+    if (!state.currentProduct && products.length) state.currentProduct = products[0];
+
+    // Day tabs
+    const dtabs = document.getElementById('dayTabs');
+    dtabs.innerHTML = '';
+    const days = [...state.days].sort();
+    days.forEach(d => {
+        const btn = document.createElement('button');
+        btn.className = 'selector-btn' + (d === state.currentDay ? ' active' : '');
+        btn.textContent = extractDayLabel(d);
+        btn.onclick = () => { state.currentDay = d; rebuildUI(); renderAll(); };
+        dtabs.appendChild(btn);
+    });
+
+    if (!state.currentDay && days.length) state.currentDay = days[0];
+
+    // Interval tabs
+    const itabs = document.getElementById('intervalTabs');
+    itabs.innerHTML = '';
+    intervals.forEach(iv => {
+        const btn = document.createElement('button');
+        btn.className = 'selector-btn' + (iv.ms === state.currentInterval ? ' active' : '');
+        btn.textContent = iv.label;
+        btn.onclick = () => { state.currentInterval = iv.ms; rebuildUI(); renderAll(); };
+        itabs.appendChild(btn);
+    });
+
+    document.getElementById('priceChartTitle').textContent =
+        `${state.currentProduct || '—'} — OHLC (${intervals.find(i => i.ms === state.currentInterval)?.label || ''})`;
+}
+
+// ─── Data Transformation ─────────────────────────────────
+
+// Convert IMC timestamps into pseudo UNIX timestamps for the chart library.
+// We use day offset so different days don't overlap.
+function toUnixTime(dayKey, timestamp) {
+    const dayMatch = dayKey.match(/day_(-?\d+)/);
+    const dayNum = dayMatch ? parseInt(dayMatch[1]) : 0;
+    // Base: 2026-01-01 00:00:00 UTC = 1767225600
+    // Each day offset by 86400s, timestamp is in ms → convert to s
+    const base = 1767225600 + (dayNum + 10) * 86400;
+    return base + (timestamp / 1000);
+}
+
+function getFilteredPrices() {
+    const raw = state.priceData[state.currentDay] || [];
+    return raw.filter(r => r.product === state.currentProduct)
+              .sort((a, b) => a.timestamp - b.timestamp);
+}
+
+function getFilteredTrades() {
+    const raw = state.tradeData[state.currentDay] || [];
+    return raw.filter(r => (r.symbol || r.product) === state.currentProduct)
+              .sort((a, b) => a.timestamp - b.timestamp);
+}
+
+function buildOHLC(prices, intervalMs) {
+    if (!prices.length) return [];
+
+    const candles = [];
+    let bucket = null;
+    let bucketStart = null;
+
+    prices.forEach(row => {
+        const t = row.timestamp;
+        const bStart = Math.floor(t / intervalMs) * intervalMs;
+        const mid = row.mid_price;
+
+        if (mid == null || isNaN(mid)) return;
+
+        if (bStart !== bucketStart) {
+            if (bucket) candles.push(bucket);
+            const time = toUnixTime(state.currentDay, bStart);
+            bucket = { time, open: mid, high: mid, low: mid, close: mid };
+            bucketStart = bStart;
+        } else {
+            bucket.high = Math.max(bucket.high, mid);
+            bucket.low = Math.min(bucket.low, mid);
+            bucket.close = mid;
+        }
+    });
+
+    if (bucket) candles.push(bucket);
+    return candles;
+}
+
+function buildVolumeData(trades, intervalMs) {
+    if (!trades.length) return [];
+
+    const buckets = {};
+    trades.forEach(row => {
+        const bStart = Math.floor(row.timestamp / intervalMs) * intervalMs;
+        const time = toUnixTime(state.currentDay, bStart);
+        if (!buckets[time]) buckets[time] = { time, value: 0 };
+        buckets[time].value += Math.abs(row.quantity || 0);
+    });
+
+    return Object.values(buckets).sort((a, b) => a.time - b.time).map(b => ({
+        ...b,
+        color: b.value > 10 ? 'rgba(59, 130, 246, 0.6)' : 'rgba(59, 130, 246, 0.3)',
+    }));
+}
+
+function buildPnLData(prices) {
+    const seen = new Set();
+    return prices
+        .filter(r => r.profit_and_loss != null && !isNaN(r.profit_and_loss))
+        .map(r => {
+            const time = toUnixTime(state.currentDay, r.timestamp);
+            if (seen.has(time)) return null;
+            seen.add(time);
+            return { time, value: r.profit_and_loss };
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.time - b.time);
+}
+
+function buildSpreadData(prices) {
+    const seen = new Set();
+    return prices
+        .filter(r => r.bid_price_1 != null && r.ask_price_1 != null)
+        .map(r => {
+            const time = toUnixTime(state.currentDay, r.timestamp);
+            if (seen.has(time)) return null;
+            seen.add(time);
+            return { time, value: r.ask_price_1 - r.bid_price_1 };
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.time - b.time);
+}
+
+function buildBidAskLines(prices) {
+    const bidData = [];
+    const askData = [];
+    const seenBid = new Set();
+    const seenAsk = new Set();
+
+    prices.forEach(r => {
+        const time = toUnixTime(state.currentDay, r.timestamp);
+        if (r.bid_price_1 != null && !seenBid.has(time)) {
+            seenBid.add(time);
+            bidData.push({ time, value: r.bid_price_1 });
+        }
+        if (r.ask_price_1 != null && !seenAsk.has(time)) {
+            seenAsk.add(time);
+            askData.push({ time, value: r.ask_price_1 });
+        }
+    });
+
+    return {
+        bid: bidData.sort((a, b) => a.time - b.time),
+        ask: askData.sort((a, b) => a.time - b.time),
+    };
+}
+
+function buildTradeMarkers(trades) {
+    return trades.map(t => ({
+        time: toUnixTime(state.currentDay, t.timestamp),
+        position: 'belowBar',
+        color: '#a855f7',
+        shape: 'circle',
+        size: 0.5,
+    })).sort((a, b) => a.time - b.time);
+}
+
+// ─── Render ──────────────────────────────────────────────
+function renderAll() {
+    const prices = getFilteredPrices();
+    const trades = getFilteredTrades();
+    const iv = state.currentInterval;
+
+    // OHLC
+    const ohlc = buildOHLC(prices, iv);
+    candleSeries.setData(ohlc);
+
+    // Bid/Ask on price chart
+    const { bid, ask } = buildBidAskLines(prices);
+    bidLineSeries.setData(bid);
+    askLineSeries.setData(ask);
+
+    // Trade markers
+    const markers = buildTradeMarkers(trades);
+    candleSeries.setMarkers(markers);
+
+    // Volume
+    const vol = buildVolumeData(trades, iv);
+    volumeSeries.setData(vol);
+
+    // P&L
+    const pnl = buildPnLData(prices);
+    pnlSeries.setData(pnl);
+
+    // Spread
+    const spread = buildSpreadData(prices);
+    spreadSeries.setData(spread);
+
+    // Fit content
+    priceChart.timeScale().fitContent();
+    volumeChart.timeScale().fitContent();
+    pnlChart.timeScale().fitContent();
+    spreadChart.timeScale().fitContent();
+
+    // Update info bar
+    updateInfoBar(prices, trades, ohlc);
+
+    // Update trades table
+    renderTradesTable(trades);
+
+    // Store prices for crosshair lookup
+    state._currentPrices = prices;
+}
+
+function updateInfoBar(prices, trades, ohlc) {
+    if (!prices.length) return;
+
+    const last = prices[prices.length - 1];
+    const first = prices[0];
+
+    document.getElementById('infoMid').textContent = last.mid_price?.toFixed(1) ?? '—';
+
+    if (ohlc.length) {
+        document.getElementById('infoOpen').textContent = ohlc[0].open.toFixed(1);
+        const allHigh = Math.max(...ohlc.map(c => c.high));
+        const allLow = Math.min(...ohlc.map(c => c.low));
+        document.getElementById('infoHigh').textContent = allHigh.toFixed(1);
+        document.getElementById('infoLow').textContent = allLow.toFixed(1);
+    }
+
+    if (last.bid_price_1 != null && last.ask_price_1 != null) {
+        document.getElementById('infoSpread').textContent =
+            (last.ask_price_1 - last.bid_price_1).toFixed(1);
+    }
+
+    const pnlVal = last.profit_and_loss ?? 0;
+    const pnlEl = document.getElementById('infoPnL');
+    pnlEl.textContent = pnlVal.toFixed(1);
+    pnlEl.className = 'info-value ' + (pnlVal >= 0 ? 'positive' : 'negative');
+
+    document.getElementById('infoTrades').textContent = trades.length;
+}
+
+function renderTradesTable(trades) {
+    const tbody = document.getElementById('tradesBody');
+    tbody.innerHTML = '';
+
+    document.getElementById('tradeCount').textContent = `${trades.length} trades`;
+
+    trades.forEach(t => {
+        const tr = document.createElement('tr');
+        const ts = (t.timestamp / 1000).toFixed(1) + 's';
+        const price = t.price?.toFixed(1) ?? '—';
+        const qty = t.quantity ?? '—';
+        const buyer = t.buyer || '—';
+        const seller = t.seller || '—';
+        const value = (t.price && t.quantity) ? (t.price * Math.abs(t.quantity)).toFixed(0) : '—';
+
+        tr.innerHTML = `
+            <td>${ts}</td>
+            <td style="color: var(--text-primary); font-weight: 500;">${price}</td>
+            <td>${qty}</td>
+            <td>${buyer}</td>
+            <td>${seller}</td>
+            <td>${value}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+// ─── Crosshair → Order Book ──────────────────────────────
+function handleCrosshairMove(param) {
+    const content = document.getElementById('orderBookContent');
+
+    if (!param.time || !state._currentPrices?.length) {
+        return;
+    }
+
+    // Find the closest price row to the crosshair timestamp
+    const target = param.time;
+    let closest = state._currentPrices[0];
+    let minDiff = Infinity;
+
+    for (const row of state._currentPrices) {
+        const t = toUnixTime(state.currentDay, row.timestamp);
+        const diff = Math.abs(t - target);
+        if (diff < minDiff) {
+            minDiff = diff;
+            closest = row;
+        }
+        if (t > target) break;
+    }
+
+    renderOrderBook(closest, content);
+}
+
+function renderOrderBook(row, container) {
+    const asks = [];
+    const bids = [];
+
+    for (let i = 3; i >= 1; i--) {
+        const ap = row[`ask_price_${i}`];
+        const av = row[`ask_volume_${i}`];
+        if (ap != null && av != null) asks.push({ price: ap, volume: av });
+    }
+    for (let i = 1; i <= 3; i++) {
+        const bp = row[`bid_price_${i}`];
+        const bv = row[`bid_volume_${i}`];
+        if (bp != null && bv != null) bids.push({ price: bp, volume: bv });
+    }
+
+    const maxVol = Math.max(
+        ...asks.map(a => a.volume),
+        ...bids.map(b => b.volume),
+        1
+    );
+
+    const spread = (asks.length && bids.length)
+        ? (asks[asks.length - 1].price - bids[0].price).toFixed(1)
+        : '—';
+
+    let html = `
+        <div class="ob-header-row">
+            <span>Price</span>
+            <span style="text-align:right;">Size</span>
+            <span style="text-align:right;">Total</span>
+        </div>
+    `;
+
+    let askTotal = asks.reduce((s, a) => s + a.volume, 0);
+    asks.forEach(a => {
+        const pct = (a.volume / maxVol) * 100;
+        html += `
+            <div class="ob-row ask">
+                <span class="price">${a.price.toFixed(1)}</span>
+                <span class="volume">${a.volume}</span>
+                <span class="total">${askTotal}</span>
+                <div class="depth-bar" style="width: ${pct}%"></div>
+            </div>
+        `;
+        askTotal -= a.volume;
+    });
+
+    html += `
+        <div class="ob-spread">
+            Spread <span class="ob-spread-val">${spread}</span>
+            Mid <span class="ob-spread-val">${row.mid_price?.toFixed(1) ?? '—'}</span>
+        </div>
+    `;
+
+    let bidTotal = 0;
+    bids.forEach(b => {
+        bidTotal += b.volume;
+        const pct = (b.volume / maxVol) * 100;
+        html += `
+            <div class="ob-row bid">
+                <span class="price">${b.price.toFixed(1)}</span>
+                <span class="volume">${b.volume}</span>
+                <span class="total">${bidTotal}</span>
+                <div class="depth-bar" style="width: ${pct}%"></div>
+            </div>
+        `;
+    });
+
+    container.innerHTML = html;
+}
+
+// ─── Resize Handling ─────────────────────────────────────
+function handleResize() {
+    const containers = [
+        { chart: priceChart, id: 'priceChart' },
+        { chart: volumeChart, id: 'volumeChart' },
+        { chart: pnlChart, id: 'pnlChart' },
+        { chart: spreadChart, id: 'spreadChart' },
+    ];
+
+    containers.forEach(({ chart, id }) => {
+        const el = document.getElementById(id);
+        chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+    });
+}
+
+// ─── Init ────────────────────────────────────────────────
+function init() {
+    createCharts();
+    setupDragDrop();
+    rebuildUI();
+
+    window.addEventListener('resize', handleResize);
+    handleResize();
+
+    // No data loaded by default — hide loading immediately
+    document.getElementById('loadingOverlay').classList.add('hidden');
+}
+
+init();
+</script>
+</body>
+</html>
