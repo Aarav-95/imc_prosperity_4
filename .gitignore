@@ -1,3 +1,4 @@
 data/*
 ai_insights/*
 __pycache__/*
+backtest.py
