@@ -228,14 +228,10 @@ class Trader:
         best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else None
         best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else None
 
-        if best_bid and best_ask:
-            mid = (best_bid + best_ask) / 2
-        elif best_ask:
-            mid = best_ask
-        elif best_bid:
-            mid = best_bid
-        else:
-            return orders
+        # Only trust mid when BOTH sides of the book exist.
+        # One-sided books give a biased mid (off by ~half the spread).
+        book_healthy = best_bid is not None and best_ask is not None
+        mid = (best_bid + best_ask) / 2 if book_healthy else None
 
         # ── Compute dynamic fair value from linear trend ──────────
         if "pepper_base" in trader_data:
@@ -243,13 +239,15 @@ class Trader:
             base_ts = trader_data["pepper_ts"]
             fair_value = base_price + SLOPE * (state.timestamp - base_ts)
 
-            # Recalibrate if our projection drifts too far from observed mid
-            if abs(fair_value - mid) > 10:
+            # Only recalibrate from a healthy (two-sided) book
+            if book_healthy and abs(fair_value - mid) > 10:
                 trader_data["pepper_base"] = mid
                 trader_data["pepper_ts"] = state.timestamp
                 fair_value = mid
         else:
-            # First tick: anchor to current mid
+            # First tick: wait for a healthy book to anchor
+            if not book_healthy:
+                return orders
             fair_value = mid
             trader_data["pepper_base"] = mid
             trader_data["pepper_ts"] = state.timestamp
