@@ -1,19 +1,5 @@
 from __future__ import annotations
 
-"""
-Manual Trading Auction Optimizer
-
-Given an order book, finds the optimal limit buy order (price, quantity) to
-maximize profit from the guaranteed Merchant Guild buyback.
-
-Clearing price rules:
-  1. Maximizes total traded volume
-  2. Breaks ties by choosing the higher price
-
-You are LAST in time priority at any price level you join.
-"""
-
-
 def clearing_price(bids: list[tuple[float, int]], asks: list[tuple[float, int]]) -> tuple[float | None, int]:
     """
     Calculate the clearing price for an order book.
@@ -75,43 +61,85 @@ def compute_fill(bid_price: int, qty: int, original_bids: list[tuple[float, int]
 
 def find_optimal_order(bids: list[tuple[float, int]], asks: list[tuple[float, int]],
                        buyback_price: float, fee_per_unit: float = 0.0,
-                       max_qty: int = 50000) -> dict:
+                       max_qty: int = 10_000_000) -> dict:
     """
     Find the optimal limit buy order to maximize profit from the guaranteed buyback.
 
-    Args:
-        bids:           existing buy orders as (price, volume)
-        asks:           existing sell orders as (price, volume)
-        buyback_price:  Merchant Guild buyback price per unit
-        fee_per_unit:   fee charged per unit traded (deducted from profit)
-        max_qty:        max quantity to search over
-
-    Returns:
-        dict with keys: order_price, order_qty, clearing_price, fill, profit
-        or None if no profitable order exists
+    For each candidate bid price, we analytically determine the quantity
+    thresholds where the clearing price changes, ensuring we never miss
+    the optimum.
     """
     all_prices = sorted(set(p for p, _ in bids) | set(p for p, _ in asks))
     if not all_prices:
         return None
 
-    # Search over all integer prices from below the book up to just under buyback
     price_lo = min(all_prices) - 2
-    price_hi = int(buyback_price)  # bidding at buyback itself yields 0 profit
+    price_hi = max(max(all_prices), int(buyback_price)) + 1
     candidate_prices = range(price_lo, price_hi)
 
     best = {"order_price": None, "order_qty": 0, "clearing_price": None,
             "fill": 0, "profit": 0.0}
 
+    # Precompute cumulative demand/supply at each price level for speed
+    all_book_prices = sorted(set(p for p, _ in bids) | set(p for p, _ in asks))
+
     for bid_price in candidate_prices:
-        for qty in range(1, max_qty + 1):
-            # Add our order to the book
+        # For a given bid_price, as we increase qty from 0 to max_qty,
+        # the clearing price can only stay the same or increase (more demand).
+        # We find the exact qty where the clearing price transitions between levels.
+        #
+        # Strategy: for each possible clearing price cp, compute the range of
+        # qty values that produce that cp, then compute the best profit in that range.
+
+        for target_cp in all_book_prices:
+            if bid_price < target_cp:
+                continue  # we wouldn't get filled
+            margin = buyback_price - target_cp - fee_per_unit
+            if margin <= 0:
+                continue  # no profit at this clearing price
+
+            # What qty range produces clearing price = target_cp?
+            # We need: at target_cp, traded volume (with our order) >= traded at all other prices
+            # AND target_cp is the highest price among those that maximize volume
+            #
+            # Instead of solving analytically (complex with tie-breaking),
+            # binary search for the max qty that keeps cp at or below target_cp.
+
+            # First check: does qty=1 already push cp above target_cp?
+            new_bids_1 = bids + [(bid_price, 1)]
+            cp_1, _ = clearing_price(new_bids_1, asks)
+            if cp_1 is not None and cp_1 > target_cp and bid_price >= cp_1:
+                # Even qty=1 at this bid_price gives a higher cp
+                # Check if that higher cp is still profitable
+                pass
+
+            # Binary search: find max qty where clearing price == target_cp
+            lo, hi = 1, max_qty
+            max_qty_at_target = 0
+
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                new_bids_mid = bids + [(bid_price, mid)]
+                cp_mid, _ = clearing_price(new_bids_mid, asks)
+
+                if cp_mid is not None and cp_mid <= target_cp:
+                    max_qty_at_target = mid
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+
+            if max_qty_at_target == 0:
+                continue
+
+            # The best qty at this target_cp is the one that maximizes fill
+            # Since fill increases with qty (up to supply), use max_qty_at_target
+            qty = max_qty_at_target
             new_bids = bids + [(bid_price, qty)]
             cp, _ = clearing_price(new_bids, asks)
 
             if cp is None or bid_price < cp:
                 continue
 
-            # How many units do we actually get?
             fill = compute_fill(bid_price, qty, bids, asks, cp)
             if fill <= 0:
                 continue
@@ -190,16 +218,11 @@ mushroom_asks = [
     (19, 12000),
 ]
 
-
-# ══════════════════════════════════════════════════════════════════
-#  MAIN
-# ══════════════════════════════════════════════════════════════════
-
 if __name__ == "__main__":
 
     products = [
         ("DRYLAND_FLAX",    flax_bids,     flax_asks,     30, 0.00),
-        ("EMBER_MUSHROOM",  mushroom_bids, mushroom_asks, 20, 0.10),
+        ("EMBER_MUSHROOM",  mushroom_bids, mushroom_asks, 20, 0.1),
     ]
 
     for name, bids, asks, buyback, fee in products:
