@@ -111,8 +111,6 @@ class Logger:
 
 logger = Logger()
 
-PEPPER_SLOPE = 0.001
-
 MARKET_ACCESS_FEE = 2500
 
 
@@ -123,6 +121,9 @@ class Trader:
             "INTARIAN_PEPPER_ROOT": 80,
         }
         self.osmium_fair_value = 10_000
+
+    def bid(self) -> int:
+        return 500
 
     def run(self, state: TradingState):
         result = {}
@@ -135,19 +136,18 @@ class Trader:
             except Exception:
                 pass
 
-        result["ASH_COATED_OSMIUM"] = self.trade_osmium(state)
-        result["INTARIAN_PEPPER_ROOT"] = self.trade_pepper(state, trader_data)
+        result["ASH_COATED_OSMIUM"] = self.trade_osmium(state, trader_data)
+        result["INTARIAN_PEPPER_ROOT"] = self.trade_pepper(state)
 
-        trader_data["last_ts"] = state.timestamp
         new_trader_data = json.dumps(trader_data)
         logger.flush(state, result, conversions, new_trader_data)
         return result, conversions, new_trader_data
 
 
-    def trade_osmium(self, state: TradingState) -> List[Order]:
+    def trade_osmium(self, state: TradingState, trader_data: dict) -> List[Order]:
         product = "ASH_COATED_OSMIUM"
-        FAIR_VALUE = self.osmium_fair_value
         LIMIT = self.position_limits[product]
+        EMA_ALPHA = 0.05
 
         orders: List[Order] = []
         order_depth = state.order_depths.get(product)
@@ -155,6 +155,22 @@ class Trader:
             return orders
 
         position = state.position.get(product, 0)
+
+        best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else None
+        best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else None
+        if best_bid is not None and best_ask is not None:
+            mid = (best_bid + best_ask) / 2
+        elif best_bid is not None:
+            mid = float(best_bid)
+        elif best_ask is not None:
+            mid = float(best_ask)
+        else:
+            return orders
+
+        prev_ema = trader_data.get("osmium_ema", self.osmium_fair_value)
+        ema = EMA_ALPHA * mid + (1 - EMA_ALPHA) * prev_ema
+        trader_data["osmium_ema"] = ema
+        FAIR_VALUE = round(ema)
 
         inventory_factor = 0.08
         adjusted_fv = FAIR_VALUE - position * inventory_factor
@@ -201,7 +217,7 @@ class Trader:
 
         return orders
 
-    def trade_pepper(self, state: TradingState, trader_data: dict) -> List[Order]:
+    def trade_pepper(self, state: TradingState) -> List[Order]:
         product = "INTARIAN_PEPPER_ROOT"
         LIMIT = self.position_limits[product]
 
@@ -211,45 +227,29 @@ class Trader:
             return orders
 
         position = state.position.get(product, 0)
-        ts = state.timestamp
+        remaining = LIMIT - position
 
-        best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else None
-        best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else None
-        if best_bid is None or best_ask is None:
+        if remaining <= 0:
             return orders
-        mid_price = (best_bid + best_ask) / 2.0
-
-        last_ts = trader_data.get("last_ts", ts)
-        new_day = ts < last_ts
-        if new_day or "pepper_anchor" not in trader_data:
-            trader_data["pepper_anchor"] = mid_price - PEPPER_SLOPE * ts
-            logger.print(f"PPR anchor={trader_data['pepper_anchor']:.1f} (new_day={new_day})")
-
-        anchor = trader_data["pepper_anchor"]
-        fair_value = anchor + PEPPER_SLOPE * ts
-
-        buy_capacity = LIMIT - position
 
         for ask_price, ask_vol in sorted(order_depth.sell_orders.items()):
-            if buy_capacity <= 0:
+            if remaining <= 0:
                 break
-            qty = min(-ask_vol, buy_capacity)
+            qty = min(-ask_vol, remaining)
             orders.append(Order(product, ask_price, qty))
-            buy_capacity -= qty
-            logger.print(f"PPR TAKE BUY {qty}x @ {ask_price} fv={fair_value:.1f}")
+            remaining -= qty
+            logger.print(f"PPR BUY {qty}x @ {ask_price}")
 
-        if buy_capacity > 0:
-            bid_price = best_ask if order_depth.sell_orders else best_bid + 1
-            orders.append(Order(product, bid_price, buy_capacity))
-            logger.print(f"PPR POST BID {buy_capacity}x @ {bid_price} fv={fair_value:.1f}")
-
-        SELL_SPIKE_EDGE = 8
-        sell_capacity = position #never go net short
-        for bid_price, bid_vol in sorted(order_depth.buy_orders.items(), reverse=True):
-            if bid_price >= fair_value + SELL_SPIKE_EDGE and sell_capacity > 0:
-                qty = min(bid_vol, sell_capacity)
-                orders.append(Order(product, bid_price, -qty))
-                sell_capacity -= qty
-                logger.print(f"PPR TAKE SELL {qty}x @ {bid_price} fv={fair_value:.1f}")
+        if remaining > 0:
+            best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else None
+            best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else None
+            if best_ask:
+                bid_price = best_ask
+            elif best_bid:
+                bid_price = best_bid + 1
+            else:
+                return orders
+            orders.append(Order(product, bid_price, remaining))
+            logger.print(f"PPR AGGRESSIVE BID {remaining}x @ {bid_price}")
 
         return orders
