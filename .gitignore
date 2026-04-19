@@ -2,3 +2,4 @@ data/*
 ai_insights/*
 __pycache__/*
 backtest.py
+ROUND_2/*
