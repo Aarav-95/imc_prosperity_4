@@ -230,18 +230,18 @@ class Trader:
 
         buy_capacity = LIMIT - position
 
-        BUY_TAKE_EDGE = 3
         for ask_price, ask_vol in sorted(order_depth.sell_orders.items()):
-            if ask_price <= fair_value + BUY_TAKE_EDGE and buy_capacity > 0:
-                qty = min(-ask_vol, buy_capacity)
-                orders.append(Order(product, ask_price, qty))
-                buy_capacity -= qty
-                logger.print(f"PPR TAKE BUY {qty}x @ {ask_price} fv={fair_value:.1f}")
+            if buy_capacity <= 0:
+                break
+            qty = min(-ask_vol, buy_capacity)
+            orders.append(Order(product, ask_price, qty))
+            buy_capacity -= qty
+            logger.print(f"PPR TAKE BUY {qty}x @ {ask_price} fv={fair_value:.1f}")
 
         if buy_capacity > 0:
-            our_bid = min(best_bid + 1, round(fair_value) - 1)
-            orders.append(Order(product, our_bid, buy_capacity))
-            logger.print(f"PPR POST BID {buy_capacity}x @ {our_bid} fv={fair_value:.1f}")
+            bid_price = best_ask if order_depth.sell_orders else best_bid + 1
+            orders.append(Order(product, bid_price, buy_capacity))
+            logger.print(f"PPR POST BID {buy_capacity}x @ {bid_price} fv={fair_value:.1f}")
 
         SELL_SPIKE_EDGE = 8
         sell_capacity = position #never go net short
