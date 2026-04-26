@@ -277,8 +277,9 @@ class Trader:
         LIMIT = self.position_limits[product]
 
         # ── Tunable parameters ──────────────────────────────────
-        SPREAD = 1             # Tight spread to maximize fills
-        SKEW_FACTOR = 0.10     # Aggressive inventory skewing
+        SKEW_FACTOR = 0.10     # Inventory skew per unit position
+        IMB_SHIFT = 2          # Shift FV by this many ticks when imbalance detected
+        SPREAD = 1             # Min distance from FV for passive quotes
 
         orders: List[Order] = []
         order_depth = state.order_depths.get(product)
@@ -287,7 +288,7 @@ class Trader:
 
         position = state.position.get(product, 0)
 
-        # ── Calculate current mid-price ─────────────────────────
+        # ── Calculate best bid/ask and mid ───────────────────────
         best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else None
         best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else None
 
@@ -300,17 +301,28 @@ class Trader:
         else:
             return orders
 
-        # ── Fair value = mid + inventory skew ───────────────────
-        skew = -position * SKEW_FACTOR
-        fv = round(mid + skew)
+        # ── Compute order book imbalance ─────────────────────────
+        # Sum all bid volume and ask volume across ALL levels
+        total_bid_vol = sum(order_depth.buy_orders.values())     # positive
+        total_ask_vol = sum(-v for v in order_depth.sell_orders.values())  # make positive
+        total_vol = total_bid_vol + total_ask_vol
+
+        if total_vol > 0:
+            imbalance = (total_bid_vol - total_ask_vol) / total_vol  # +1 = all bids, -1 = all asks
+        else:
+            imbalance = 0
+
+        # ── Fair value = mid + imbalance signal + inventory skew ─
+        # When bid_vol >> ask_vol: price likely to go UP → raise FV → more eager to buy
+        # When ask_vol >> bid_vol: price likely to go DOWN → lower FV → more eager to sell
+        imb_adjustment = round(imbalance * IMB_SHIFT)
+        inv_skew = -position * SKEW_FACTOR
+        fv = round(mid + imb_adjustment + inv_skew)
 
         buy_capacity = LIMIT - position
         sell_capacity = LIMIT + position
 
-        # ── Phase 1: Take mispriced orders (only vs skewed FV) ──
-        # With mid-based FV, takes only happen when inventory skew
-        # pushes FV away from mid. E.g. if we're long 100, FV drops
-        # by 10, and we'll sell-take anything above that lower FV.
+        # ── Phase 1: Take mispriced orders ───────────────────────
         for ask_price, ask_vol in sorted(order_depth.sell_orders.items()):
             if ask_price < fv and buy_capacity > 0:
                 qty = min(-ask_vol, buy_capacity)
@@ -323,35 +335,16 @@ class Trader:
                 orders.append(Order(product, bid_price, -qty))
                 sell_capacity -= qty
 
-        # ── Phase 2: Layered passive quotes ─────────────────────
-        # Post at multiple price levels to capture fills at different
-        # book depths. Closer levels = more likely to fill.
-        # Split capacity across layers.
+        # ── Phase 2: Post passive quotes around FV ───────────────
         if buy_capacity > 0:
-            # Layer 1: Tight (penny the book or fv - SPREAD)
             book_bid = best_bid if best_bid is not None else (fv - SPREAD - 1)
-            bid_1 = min(book_bid + 1, fv - SPREAD)
-            # Layer 2: Wider (deeper in the book)
-            bid_2 = fv - SPREAD - 2
-
-            qty_1 = (buy_capacity + 1) // 2  # majority at tight level
-            qty_2 = buy_capacity - qty_1
-
-            orders.append(Order(product, bid_1, qty_1))
-            if qty_2 > 0:
-                orders.append(Order(product, bid_2, qty_2))
+            our_bid = min(book_bid + 1, fv - SPREAD)
+            orders.append(Order(product, our_bid, buy_capacity))
 
         if sell_capacity > 0:
             book_ask = best_ask if best_ask is not None else (fv + SPREAD + 1)
-            ask_1 = max(book_ask - 1, fv + SPREAD)
-            ask_2 = fv + SPREAD + 2
-
-            qty_1 = (sell_capacity + 1) // 2
-            qty_2 = sell_capacity - qty_1
-
-            orders.append(Order(product, ask_1, -qty_1))
-            if qty_2 > 0:
-                orders.append(Order(product, ask_2, -qty_2))
+            our_ask = max(book_ask - 1, fv + SPREAD)
+            orders.append(Order(product, our_ask, -sell_capacity))
 
         return orders
 
