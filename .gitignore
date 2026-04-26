@@ -6,3 +6,6 @@ prosperity_rust_backtester/*
 prosperity_rust_backtester
 */__pycache__.metals/
 .metals
+ROUND_2/*
+ROUND_3/*
+
