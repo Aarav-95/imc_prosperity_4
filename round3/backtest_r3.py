@@ -241,7 +241,7 @@ if __name__ == "__main__":
         print(f"  Difference   : {sign}{diff:>11,.1f}  ({'BETTER' if diff>0 else 'WORSE'})")
         print(f"{'='*65}")
     else:
-        import trader_round3 as trader
+        import trader as trader_module
         print("Running improved trader backtest...")
-        r = run_backtest(trader, "IMPROVED trader_round3.py")
+        r = run_backtest(trader_module, "IMPROVED trader.py")
         print_result(r)
