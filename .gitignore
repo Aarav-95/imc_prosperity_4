@@ -1,5 +1,7 @@
 data/*
 ai_insights/*
+ai_insights
 __pycache__/*
-backtest.py
-ROUND_2/*
+prosperity_rust_backtester/*
+prosperity_rust_backtester
+*/__pycache__

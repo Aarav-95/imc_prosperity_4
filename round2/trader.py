@@ -1,9 +1,7 @@
-#this one got 10384 pnl
-
 import json
-from typing import Any, List
+from typing import Any
 from datamodel import OrderDepth, TradingState, Order, Symbol, Listing, Trade, Observation, ProsperityEncoder
-
+from typing import List
 
 class Logger:
     def __init__(self) -> None:
@@ -25,6 +23,8 @@ class Logger:
                 ]
             )
         )
+
+        # We truncate state.traderData, trader_data, and self.logs to the same max. length to fit the log limit
         max_item_length = (self.max_log_length - base_length) // 3
 
         print(
@@ -38,6 +38,7 @@ class Logger:
                 ]
             )
         )
+
         self.logs = ""
 
     def compress_state(self, state: TradingState, trader_data: str) -> list[Any]:
@@ -56,32 +57,46 @@ class Logger:
         compressed = []
         for listing in listings.values():
             compressed.append([listing.symbol, listing.product, listing.denomination])
+
         return compressed
 
     def compress_order_depths(self, order_depths: dict[Symbol, OrderDepth]) -> dict[Symbol, list[Any]]:
         compressed = {}
         for symbol, order_depth in order_depths.items():
             compressed[symbol] = [order_depth.buy_orders, order_depth.sell_orders]
+
         return compressed
 
     def compress_trades(self, trades: dict[Symbol, list[Trade]]) -> list[list[Any]]:
         compressed = []
         for arr in trades.values():
             for trade in arr:
-                compressed.append([
-                    trade.symbol, trade.price, trade.quantity,
-                    trade.buyer, trade.seller, trade.timestamp,
-                ])
+                compressed.append(
+                    [
+                        trade.symbol,
+                        trade.price,
+                        trade.quantity,
+                        trade.buyer,
+                        trade.seller,
+                        trade.timestamp,
+                    ]
+                )
+
         return compressed
 
     def compress_observations(self, observations: Observation) -> list[Any]:
         conversion_observations = {}
         for product, observation in observations.conversionObservations.items():
             conversion_observations[product] = [
-                observation.bidPrice, observation.askPrice, observation.transportFees,
-                observation.exportTariff, observation.importTariff,
-                observation.sugarPrice, observation.sunlightIndex,
+                observation.bidPrice,
+                observation.askPrice,
+                observation.transportFees,
+                observation.exportTariff,
+                observation.importTariff,
+                observation.sugarPrice,
+                observation.sunlightIndex,
             ]
+
         return [observations.plainValueObservations, conversion_observations]
 
     def compress_orders(self, orders: dict[Symbol, list[Order]]) -> list[list[Any]]:
@@ -89,6 +104,7 @@ class Logger:
         for arr in orders.values():
             for order in arr:
                 compressed.append([order.symbol, order.price, order.quantity])
+
         return compressed
 
     def to_json(self, value: Any) -> str:
@@ -97,35 +113,44 @@ class Logger:
     def truncate(self, value: str, max_length: int) -> str:
         lo, hi = 0, min(len(value), max_length)
         out = ""
+
         while lo <= hi:
             mid = (lo + hi) // 2
+
             candidate = value[:mid]
             if len(candidate) < len(value):
                 candidate += "..."
+
             encoded_candidate = json.dumps(candidate)
+
             if len(encoded_candidate) <= max_length:
                 out = candidate
                 lo = mid + 1
             else:
                 hi = mid - 1
+
         return out
 
 
 logger = Logger()
 
-
 class Trader:
+
     def __init__(self):
+
         self.position_limits = {
             "ASH_COATED_OSMIUM": 80,
             "INTARIAN_PEPPER_ROOT": 80
         }
-        self.osmium_fair_value = 10_000 #mean reverting
+
+    def bid(self):
+        return 15
 
     def run(self, state: TradingState):
         result = {}
         conversions = 0
 
+        # ── Deserialize persistent state ──────────────────────────
         trader_data = {}
         if state.traderData:
             try:
@@ -133,72 +158,89 @@ class Trader:
             except:
                 pass
 
-        result["ASH_COATED_OSMIUM"] = self.trade_osmium(state)
-        result["INTARIAN_PEPPER_ROOT"] = self.trade_pepper(state)
+        result["ASH_COATED_OSMIUM"] = self.trade_osmium(state, trader_data)
+        result["INTARIAN_PEPPER_ROOT"] = self.trade_pepper(state, trader_data)
 
+        # ── Serialize persistent state ────────────────────────────
         traderData = json.dumps(trader_data)
         logger.flush(state, result, conversions, traderData)
         return result, conversions, traderData
 
-    def trade_osmium(self, state: TradingState) -> List[Order]:
+    def trade_osmium(self, state: TradingState, trader_data: dict) -> List[Order]:
         product = "ASH_COATED_OSMIUM"
-        FAIR_VALUE = self.osmium_fair_value
         LIMIT = self.position_limits[product]
 
-        orders: List[Order] = []
-        order_depth = state.order_depths.get(product)
-        if not order_depth:
-            return orders
+        # ── Tunable parameters ──────────────────────────────────
+        EMA_ALPHA = 0.05   # How fast the EMA adapts (0.01=slow, 0.1=fast)
+        SPREAD = 1         # Min distance from fair value for passive quotes
 
+        orders: List[Order] = []
+        order_depth = state.order_depths[product]
         position = state.position.get(product, 0)
 
-        #inventory adj
-        inventory_factor = 0.08
-        adjusted_fv = FAIR_VALUE - position * inventory_factor
+        # ── Calculate current mid-price ─────────────────────────
+        best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else None
+        best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else None
+
+        if best_bid is not None and best_ask is not None:
+            mid = (best_bid + best_ask) / 2
+        elif best_bid is not None:
+            mid = best_bid
+        elif best_ask is not None:
+            mid = best_ask
+        else:
+            return orders  # no book, skip
+
+        # ── Update EMA fair value ───────────────────────────────
+        if "osmium_ema" in trader_data:
+            ema = trader_data["osmium_ema"]
+            ema = EMA_ALPHA * mid + (1 - EMA_ALPHA) * ema
+        else:
+            ema = mid  # first tick: initialize to current mid
+
+        trader_data["osmium_ema"] = ema
+        FAIR_VALUE = round(ema)
+
+        logger.print(f"OSM mid={mid} ema={ema:.1f} fv={FAIR_VALUE}")
 
         buy_capacity = LIMIT - position
         sell_capacity = LIMIT + position
 
+        # ── Phase 1: Take all mispriced orders ──────────────────────
+
+        # Buy from anyone selling below fair value (walk asks low → high)
         for ask_price, ask_vol in sorted(order_depth.sell_orders.items()):
-            if ask_price < adjusted_fv and buy_capacity > 0:
-                qty = min(-ask_vol, buy_capacity)
+            if ask_price < FAIR_VALUE and buy_capacity > 0:
+                qty = min(-ask_vol, buy_capacity)  # ask_vol is negative
                 orders.append(Order(product, ask_price, qty))
                 buy_capacity -= qty
-                logger.print(f"OSM TAKE BUY {qty}x @ {ask_price}")
+                logger.print(f"TAKE BUY {qty}x @ {ask_price}")
 
+        # Sell to anyone buying above fair value (walk bids high → low)
         for bid_price, bid_vol in sorted(order_depth.buy_orders.items(), reverse=True):
-            if bid_price > adjusted_fv and sell_capacity > 0:
+            if bid_price > FAIR_VALUE and sell_capacity > 0:
                 qty = min(bid_vol, sell_capacity)
                 orders.append(Order(product, bid_price, -qty))
                 sell_capacity -= qty
-                logger.print(f"OSM TAKE SELL {qty}x @ {bid_price}")
+                logger.print(f"TAKE SELL {qty}x @ {bid_price}")
 
-        if position > 40:
-            bid_offset, ask_offset = 3, 1
-        elif position > 0:
-            bid_offset, ask_offset = 2, 1
-        elif position < -40:
-            bid_offset, ask_offset = 1, 3
-        elif position < 0:
-            bid_offset, ask_offset = 1, 2
-        else:
-            bid_offset, ask_offset = 1, 1
+        # ── Phase 2: Post passive quotes that penny the book ─────────
 
         if buy_capacity > 0:
-            best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else (FAIR_VALUE - 3)
-            our_bid = min(best_bid + 1, FAIR_VALUE - bid_offset)
+            best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else (FAIR_VALUE - 2)
+            our_bid = min(best_bid + 1, FAIR_VALUE - 1)  # overbid by 1, but stay below fair
             orders.append(Order(product, our_bid, buy_capacity))
-            logger.print(f"OSM POST BID {buy_capacity}x @ {our_bid}")
+            logger.print(f"POST BID {buy_capacity}x @ {our_bid}")
 
         if sell_capacity > 0:
-            best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else (FAIR_VALUE + 3)
-            our_ask = max(best_ask - 1, FAIR_VALUE + ask_offset)
+            best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else (FAIR_VALUE + 2)
+            our_ask = max(best_ask - 1, FAIR_VALUE + 1)  # undercut by 1, but stay above fair
             orders.append(Order(product, our_ask, -sell_capacity))
-            logger.print(f"OSM POST ASK {sell_capacity}x @ {our_ask}")
+            logger.print(f"POST ASK {sell_capacity}x @ {our_ask}")
 
         return orders
 
-    def trade_pepper(self, state: TradingState) -> List[Order]:
+    def trade_pepper(self, state: TradingState, trader_data: dict) -> List[Order]:
         product = "INTARIAN_PEPPER_ROOT"
         LIMIT = self.position_limits[product]
 
@@ -211,29 +253,30 @@ class Trader:
         remaining = LIMIT - position
 
         if remaining <= 0:
-            return orders #at max, hold
+            return orders  # at max position, just hold
 
-        #take every available ask aggressively
+        # Take every available ask (cheapest first)
         for ask_price, ask_vol in sorted(order_depth.sell_orders.items()):
             if remaining <= 0:
                 break
             qty = min(-ask_vol, remaining)
             orders.append(Order(product, ask_price, qty))
             remaining -= qty
-            logger.print(f"PPR BUY {qty}x @ {ask_price}")
+            logger.print(f"PEPPER BUY {qty}x @ {ask_price}")
 
+        # Post aggressive bid for any remaining capacity
         if remaining > 0:
             best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else None
             best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else None
 
             if best_ask:
-                bid_price = best_ask
+                bid_price = best_ask      # match the ask to guarantee fill
             elif best_bid:
-                bid_price = best_bid + 1
+                bid_price = best_bid + 1  # penny the best bid
             else:
                 return orders
 
             orders.append(Order(product, bid_price, remaining))
-            logger.print(f"PPR AGGRESSIVE BID {remaining}x @ {bid_price}")
+            logger.print(f"PEPPER AGGRESSIVE BID {remaining}x @ {bid_price}")
 
         return orders
