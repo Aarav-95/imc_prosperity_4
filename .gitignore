@@ -4,4 +4,5 @@ ai_insights
 __pycache__/*
 prosperity_rust_backtester/*
 prosperity_rust_backtester
-*/__pycache__
+*/__pycache__.metals/
+.metals
