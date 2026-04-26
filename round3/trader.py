@@ -235,6 +235,8 @@ class Trader:
 
         # Vouchers we actively trade, grouped by strategy type
         self.VOUCHER_STRIKES = {
+            "VEV_4000": 4000,
+            "VEV_4500": 4500,
             "VEV_5000": 5000,
             "VEV_5100": 5100,
             "VEV_5200": 5200,    # Near ATM — primary buy target
@@ -266,6 +268,8 @@ class Trader:
 
         result["HYDROGEL_PACK"] = self.trade_hydrogel(state, trader_data)
         self.trade_vouchers_and_hedge(state, trader_data, result)
+        self._trade_vfe_zscore(state, trader_data, result)
+        self._trade_deep_itm_mm(state, result)
 
         # ── Serialize persistent state ────────────────────────────
         traderData = json.dumps(trader_data)
@@ -366,6 +370,90 @@ class Trader:
         tte_days = self.TOTAL_DAYS_TO_EXPIRY - day - (state.timestamp / self.TICKS_PER_DAY)
         return max(tte_days, 0.01) / 252  # Convert to years
 
+    def _trade_deep_itm_mm(self, state: TradingState, result: dict):
+        """
+        Market-make deep ITM options (VEV_4000) where spreads are 20+ ticks.
+        FV = S - K (intrinsic value; extrinsic ≈ 0 for deep ITM).
+        Strategy: overbid/undercut the book, take mispriced orders.
+        """
+        underlying = "VELVETFRUIT_EXTRACT"
+        od_u = state.order_depths.get(underlying)
+        if not od_u:
+            return
+        S = self._get_mid(od_u)
+        if S is None:
+            return
+
+        MM_STRIKES = {}
+        for voucher, K in self.VOUCHER_STRIKES.items():
+            od_v = state.order_depths.get(voucher)
+            if not od_v or not od_v.buy_orders or not od_v.sell_orders:
+                continue
+
+            v_mid = self._get_mid(od_v)
+            if v_mid is None:
+                continue
+
+            intrinsic = S - K
+            if intrinsic > 300: # Deep ITM
+                extrinsic = v_mid - intrinsic
+                if extrinsic < 15: # Very little option juice left
+                    MM_STRIKES[voucher] = K
+
+        SKEW_FACTOR = 0.02  # Per-unit position skew
+
+        for voucher, K in MM_STRIKES.items():
+            od_v = state.order_depths.get(voucher)
+
+            # Fair value = intrinsic value
+            fv = S - K
+            if fv <= 0:
+                continue
+
+            position = state.position.get(voucher, 0)
+            limit = self.position_limits.get(voucher, 300)
+
+            # Inventory skew — push FV to encourage flattening
+            skew = -position * SKEW_FACTOR
+            fv_skewed = fv + skew
+
+            buy_cap = limit - position
+            sell_cap = limit + position
+
+            best_bid = max(od_v.buy_orders.keys())
+            best_ask = min(od_v.sell_orders.keys())
+
+            orders: List[Order] = []
+
+            # ── Phase 1: Take mispriced orders ───────────────────
+            for ask_price, ask_vol in sorted(od_v.sell_orders.items()):
+                if ask_price < fv_skewed and buy_cap > 0:
+                    qty = min(-ask_vol, buy_cap)
+                    orders.append(Order(voucher, ask_price, qty))
+                    buy_cap -= qty
+
+            for bid_price, bid_vol in sorted(od_v.buy_orders.items(), reverse=True):
+                if bid_price > fv_skewed and sell_cap > 0:
+                    qty = min(bid_vol, sell_cap)
+                    orders.append(Order(voucher, bid_price, -qty))
+                    sell_cap -= qty
+
+            # ── Phase 2: Passive quotes inside the spread ────────
+            fv_int = round(fv_skewed)
+
+            if buy_cap > 0:
+                # Overbid: post just above best_bid but below FV
+                our_bid = min(best_bid + 1, fv_int - 1)
+                orders.append(Order(voucher, our_bid, buy_cap))
+
+            if sell_cap > 0:
+                # Undercut: post just below best_ask but above FV
+                our_ask = max(best_ask - 1, fv_int + 1)
+                orders.append(Order(voucher, our_ask, -sell_cap))
+
+            if orders:
+                result[voucher] = orders
+
     def trade_vouchers_and_hedge(self, state: TradingState, trader_data: dict, result: dict):
         """
         IV Scalping — exploits negative autocorrelation in price deviations
@@ -379,11 +467,7 @@ class Trader:
         5. Delta-hedge the aggregate position with the underlying
         """
         underlying = "VELVETFRUIT_EXTRACT"
-
-        # Strikes to actively trade (ATM / near-ATM with enough liquidity)
-        SCALP_STRIKES = {
-            "VEV_5200": 5200,
-        }
+        MIN_EXTRINSIC = 10  # Min extrinsic value to consider a strike for scalping
 
         # ── Get underlying price ────────────────────────────────
         od_u = state.order_depths.get(underlying)
@@ -401,6 +485,7 @@ class Trader:
         fit_ms = []     # moneyness values for fitting
         fit_ivs = []    # IV values for fitting
         strike_data = {}  # voucher -> (moneyness, iv, market_mid)
+        extrinsic_map = {}  # voucher -> extrinsic value (for strike selection)
 
         for voucher, K in self.VOUCHER_STRIKES.items():
             od_v = state.order_depths.get(voucher)
@@ -415,6 +500,11 @@ class Trader:
             extrinsic = v_mid - intrinsic
             if extrinsic < 2:
                 continue
+            # Skip deep ITM — their IV is unreliable and distorts the smile
+            if intrinsic > 300:
+                continue
+
+            extrinsic_map[voucher] = extrinsic
 
             iv = implied_vol(v_mid, S, K, T)
             if iv is not None and 0.01 < iv < 5.0:
@@ -425,6 +515,45 @@ class Trader:
 
         if len(fit_ms) < 3:
             return  # Not enough data to fit a smile
+
+        # ── Dynamically select scalp strike with hysteresis ─────
+        # Pick the nearest-to-ATM strike with enough extrinsic value.
+        # Use hysteresis: only switch from current strike if a new one
+        # is closer by >= HYSTERESIS ticks (prevents flip-flopping when
+        # underlying sits between two strikes, e.g. VFE at 5250).
+        HYSTERESIS = 30
+
+        scalp_candidates = []
+        for voucher, K in self.VOUCHER_STRIKES.items():
+            # Only scalp ITM strikes (S > K) — OTM/ATM strikes like VEV_5300
+            # are systematically mispriced by the smile fit
+            if (voucher in strike_data
+                and extrinsic_map.get(voucher, 0) >= MIN_EXTRINSIC
+                and S > K):
+                scalp_candidates.append((abs(S - K), voucher, K))
+
+        scalp_candidates.sort()  # Closest to ATM first
+
+        SCALP_STRIKES = {}
+        if scalp_candidates:
+            # Check if we have a previously active strike
+            prev_strike = trader_data.get("active_scalp_strike")
+            best_dist, best_voucher, best_K = scalp_candidates[0]
+
+            if prev_strike and prev_strike in strike_data:
+                prev_K = self.VOUCHER_STRIKES[prev_strike]
+                prev_dist = abs(S - prev_K)
+                # Only switch if new strike is closer by >= HYSTERESIS
+                if prev_dist - best_dist >= HYSTERESIS:
+                    SCALP_STRIKES = {best_voucher: best_K}
+                    trader_data["active_scalp_strike"] = best_voucher
+                else:
+                    # Stick with current strike
+                    SCALP_STRIKES = {prev_strike: prev_K}
+            else:
+                # Fresh start — use nearest ATM
+                SCALP_STRIKES = {best_voucher: best_K}
+                trader_data["active_scalp_strike"] = best_voucher
 
         # ── Fit quadratic smile: IV = a*m^2 + b*m + c ──────────
         n = len(fit_ms)
@@ -512,48 +641,117 @@ class Trader:
             if orders:
                 result[voucher] = orders
 
-        # ── Delta hedge ─────────────────────────────────────────
-        self._delta_hedge(state, net_option_delta, result)
+        # NOTE: Delta hedge replaced by VFE z-score mean-reversion
+        # (called separately from run())
 
-    def _delta_hedge(self, state: TradingState, net_option_delta: float, result: dict):
+    def _trade_vfe_zscore(self, state: TradingState, trader_data: dict, result: dict):
         """
-        Trade the underlying to offset net delta from all voucher positions.
-        Target: underlying_position = -net_option_delta
+        Mean-reversion on VELVETFRUIT_EXTRACT using VWAP z-score.
+
+        Replaces delta hedging — instead of neutralizing option delta,
+        we trade VFE directionally based on its deviation from VWAP.
+        Analysis showed this generates +114K vs -30K from hedging.
+
+        Signal:
+          z < -Z_ENTRY → BUY  (price below VWAP, expect rebound)
+          z > +Z_ENTRY → SELL (price above VWAP, expect drop)
+          z crosses 0  → FLATTEN (reverted to mean)
         """
         underlying = "VELVETFRUIT_EXTRACT"
+        VWAP_WINDOW = 100
+        Z_ENTRY = 1.5         # Enter when |z| > this
+        Z_EXIT = 0.0          # Exit when z crosses zero
+        TRADE_SIZE = 50       # Scale into position gradually
+
         od_u = state.order_depths.get(underlying)
         if not od_u:
             return
 
-        current_pos = state.position.get(underlying, 0)
-        limit = self.position_limits.get(underlying, 200)
-
-        # Target position to neutralize delta
-        target_pos = round(-net_option_delta)
-        target_pos = max(-limit, min(limit, target_pos))  # Clamp to position limit
-
-        hedge_qty = target_pos - current_pos
-
-        # Only hedge when delta imbalance is meaningful — avoid churning
-        # the underlying on every small position change (5-tick spread cost)
-        if abs(hedge_qty) < 20:
+        S = self._get_mid(od_u)
+        if S is None:
             return
 
+        limit = self.position_limits.get(underlying, 200)
+        current_pos = state.position.get(underlying, 0)
+
+        # ── Update rolling VWAP from trade data ──────────────────
+        # Use market_trades + own_trades to compute tick VWAP
+        tick_pv = 0.0
+        tick_vol = 0.0
+
+        for trade in state.market_trades.get(underlying, []):
+            tick_pv += trade.price * trade.quantity
+            tick_vol += trade.quantity
+
+        for trade in state.own_trades.get(underlying, []):
+            tick_pv += trade.price * abs(trade.quantity)
+            tick_vol += abs(trade.quantity)
+
+        # If no trades this tick, use mid as proxy
+        if tick_vol == 0:
+            tick_pv = S
+            tick_vol = 1
+
+        # Persist rolling VWAP components in trader_data
+        vwap_pv = trader_data.get("vwap_pv", [])   # list of (pv, vol) per tick
+        vwap_pv.append([tick_pv, tick_vol])
+
+        # Keep only last VWAP_WINDOW ticks
+        if len(vwap_pv) > VWAP_WINDOW:
+            vwap_pv = vwap_pv[-VWAP_WINDOW:]
+        trader_data["vwap_pv"] = vwap_pv
+
+        # Also track recent prices for std calculation
+        vwap_prices = trader_data.get("vwap_prices", [])
+        vwap_prices.append(S)
+        if len(vwap_prices) > VWAP_WINDOW:
+            vwap_prices = vwap_prices[-VWAP_WINDOW:]
+        trader_data["vwap_prices"] = vwap_prices
+
+        # Need enough history before trading
+        if len(vwap_pv) < 20:
+            return
+
+        # ── Compute VWAP and z-score ─────────────────────────────
+        total_pv = sum(x[0] for x in vwap_pv)
+        total_vol = sum(x[1] for x in vwap_pv)
+        vwap = total_pv / total_vol if total_vol > 0 else S
+
+        mean_p = sum(vwap_prices) / len(vwap_prices)
+        var_p = sum((p - mean_p) ** 2 for p in vwap_prices) / len(vwap_prices)
+        std_p = math.sqrt(var_p) if var_p > 0 else 1
+
+        z = (S - vwap) / std_p if std_p > 0.1 else 0
+
+        # ── Generate orders based on z-score ──────────────────────
         orders: List[Order] = []
 
         best_bid = max(od_u.buy_orders.keys()) if od_u.buy_orders else None
         best_ask = min(od_u.sell_orders.keys()) if od_u.sell_orders else None
 
-        if hedge_qty > 0 and best_bid is not None:
-            # Need to BUY — post passive bid (don't cross the spread)
-            bid_price = best_bid + 1
-            orders.append(Order(underlying, bid_price, hedge_qty))
+        if z < -Z_ENTRY and current_pos < limit:
+            # Price below VWAP → BUY (expect rebound)
+            qty = min(TRADE_SIZE, limit - current_pos)
+            if qty > 0 and best_bid is not None:
+                # Post PASSIVE bid — don't cross the spread
+                orders.append(Order(underlying, best_bid + 1, qty))
 
-        elif hedge_qty < 0 and best_ask is not None:
-            # Need to SELL — post passive ask (don't cross the spread)
-            ask_price = best_ask - 1
-            orders.append(Order(underlying, ask_price, hedge_qty))
+        elif z > Z_ENTRY and current_pos > -limit:
+            # Price above VWAP → SELL (expect drop)
+            qty = min(TRADE_SIZE, limit + current_pos)
+            if qty > 0 and best_ask is not None:
+                # Post PASSIVE ask — don't cross the spread
+                orders.append(Order(underlying, best_ask - 1, -qty))
+
+        elif current_pos > 0 and z > Z_EXIT:
+            # Long position has reverted — close passively
+            if best_ask is not None:
+                orders.append(Order(underlying, best_ask - 1, -current_pos))
+
+        elif current_pos < 0 and z < -Z_EXIT:
+            # Short position has reverted — close passively
+            if best_bid is not None:
+                orders.append(Order(underlying, best_bid + 1, -current_pos))
 
         if orders:
             result[underlying] = orders
-            logger.print(f"HEDGE pos={current_pos} target={target_pos} qty={hedge_qty}")
