@@ -230,7 +230,7 @@ class Trader:
         }
 
         # ── Options config ──────────────────────────────────────────
-        self.TOTAL_DAYS_TO_EXPIRY = 5         # Calibrated from IV analysis
+        self.TOTAL_DAYS_TO_EXPIRY = 4         # Round 4 = 1 day after Round 3 (was 5)
         self.TICKS_PER_DAY = 1_000_000        # Timestamps per day (0 to 999,900)
 
         # Vouchers we actively trade, grouped by strategy type
@@ -251,7 +251,7 @@ class Trader:
         result = {}
         conversions = 0
 
-        # deserialize persistent state
+        # ── Deserialize persistent state ──────────────────────────
         trader_data = {}
         if state.traderData:
             try:
@@ -259,34 +259,39 @@ class Trader:
             except:
                 pass
 
-        # track day via timestamp wrap
+        # ── Track which day we're on ──────────────────────────────
         last_ts = trader_data.get("last_ts", -1)
         if state.timestamp < last_ts:
-            # timestamp wrapped around -> new day
+            # Timestamp wrapped around → new day
             trader_data["day"] = trader_data.get("day", 0) + 1
         trader_data["last_ts"] = state.timestamp
 
         result["HYDROGEL_PACK"] = self.trade_hydrogel(state, trader_data)
         self.trade_vouchers_and_hedge(state, trader_data, result)
-        self._trade_vfe_passive_mm(state, trader_data, result)
-        self._trade_deep_itm_mm(state, trader_data, result)
+        self._trade_vfe_predator(state, trader_data, result)
+        self._trade_deep_itm_mm(state, result)
 
-        # serialize persistent state
+        # ── Serialize persistent state ────────────────────────────
         traderData = json.dumps(trader_data)
         logger.flush(state, result, conversions, traderData)
         return result, conversions, traderData
 
     def trade_hydrogel(self, state: TradingState, trader_data: dict) -> List[Order]:
+        """
+        Market-making HYDROGEL_PACK with counterparty detection.
+
+        Mark 14 + Mark 38 form a closed market-making loop on HYDROGEL.
+        Mark 14 is the more aggressive taker. When we detect Mark 14
+        buying (from market_trades), we lean our FV upward to front-run
+        the momentum. Vice versa for selling.
+        """
         product = "HYDROGEL_PACK"
         LIMIT = self.position_limits[product]
 
-        # strategy params
-        FIXED_MEAN = 9995
-        MR_THRESHOLD = 15
-        MR_STRENGTH = 0.5
-        SKEW_FACTOR = 0.10     # inventory skew per unit position
-        IMB_SHIFT = 2          # fair value shift from order book imbalance
-        SPREAD = 1             # min quote distance from fair value
+        SKEW_FACTOR = 0.10
+        IMB_SHIFT = 2
+        SPREAD = 1
+        CP_SHIFT = 1           # Additional FV shift when counterparty detected
 
         orders: List[Order] = []
         order_depth = state.order_depths.get(product)
@@ -295,7 +300,6 @@ class Trader:
 
         position = state.position.get(product, 0)
 
-        # get best bid/ask and mid
         best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else None
         best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else None
 
@@ -308,7 +312,26 @@ class Trader:
         else:
             return orders
 
-        # compute order book imbalance
+        # ── Detect Mark 14 / Mark 38 counterparty flow ───────────
+        # Mark 14 is the aggressive taker in HYDROGEL.
+        # If Mark 14 was buying last tick, price likely going UP.
+        cp_bias = 0
+        for trade in state.market_trades.get(product, []):
+            if hasattr(trade, 'buyer'):
+                if trade.buyer == "Mark 14":
+                    cp_bias += trade.quantity   # Mark 14 buying → bullish
+                elif trade.seller == "Mark 14":
+                    cp_bias -= trade.quantity   # Mark 14 selling → bearish
+
+        # Normalize: positive = bullish, negative = bearish
+        if cp_bias > 0:
+            cp_adjustment = CP_SHIFT
+        elif cp_bias < 0:
+            cp_adjustment = -CP_SHIFT
+        else:
+            cp_adjustment = 0
+
+        # ── Order book imbalance ─────────────────────────────────
         total_bid_vol = sum(order_depth.buy_orders.values())
         total_ask_vol = sum(-v for v in order_depth.sell_orders.values())
         total_vol = total_bid_vol + total_ask_vol
@@ -318,29 +341,15 @@ class Trader:
         else:
             imbalance = 0
 
-        # mean reversion adjustment
-        deviation = mid - FIXED_MEAN
-        if abs(deviation) > MR_THRESHOLD:
-            mr_adjustment = -MR_STRENGTH * deviation
-        else:
-            mr_adjustment = 0
-
-        # fair value = mid + imbalance + inventory skew + mean reversion
+        # ── Fair value = mid + signals ───────────────────────────
         imb_adjustment = round(imbalance * IMB_SHIFT)
         inv_skew = -position * SKEW_FACTOR
-        fv = round(mid + imb_adjustment + inv_skew + mr_adjustment)
+        fv = round(mid + imb_adjustment + inv_skew + cp_adjustment)
 
         buy_capacity = LIMIT - position
         sell_capacity = LIMIT + position
 
-        # react to mark 38 flow by tightening quotes
-        mark38_trades = state.market_trades.get(product, [])
-        mark38_buying  = any(t.buyer  == "Mark 38" for t in mark38_trades)
-        mark38_selling = any(t.seller == "Mark 38" for t in mark38_trades)
-        ask_spread = 0 if mark38_buying  else SPREAD
-        bid_spread = 0 if mark38_selling else SPREAD
-
-        # phase 1: take mispriced orders
+        # ── Phase 1: Take mispriced orders ───────────────────────
         for ask_price, ask_vol in sorted(order_depth.sell_orders.items()):
             if ask_price < fv and buy_capacity > 0:
                 qty = min(-ask_vol, buy_capacity)
@@ -353,23 +362,25 @@ class Trader:
                 orders.append(Order(product, bid_price, -qty))
                 sell_capacity -= qty
 
-        # phase 2: post passive quotes around fair value
+        # ── Phase 2: Post passive quotes around FV ───────────────
         if buy_capacity > 0:
-            book_bid = best_bid if best_bid is not None else (fv - bid_spread - 1)
-            our_bid = min(book_bid + 1, fv - bid_spread)
+            book_bid = best_bid if best_bid is not None else (fv - SPREAD - 1)
+            our_bid = min(book_bid + 1, fv - SPREAD)
             orders.append(Order(product, our_bid, buy_capacity))
 
         if sell_capacity > 0:
-            book_ask = best_ask if best_ask is not None else (fv + ask_spread + 1)
-            our_ask = max(book_ask - 1, fv + ask_spread)
+            book_ask = best_ask if best_ask is not None else (fv + SPREAD + 1)
+            our_ask = max(book_ask - 1, fv + SPREAD)
             orders.append(Order(product, our_ask, -sell_capacity))
 
         return orders
 
-    # voucher iv trading
+    # ══════════════════════════════════════════════════════════════
+    # VOUCHER IV TRADING + DELTA HEDGE
+    # ══════════════════════════════════════════════════════════════
 
     def _get_mid(self, order_depth: OrderDepth) -> float:
-        """get mid-price from a two-sided order book; return none if one-sided."""
+        """Get mid-price from a two-sided order book. Returns None if one-sided."""
         best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else None
         best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else None
         if best_bid is not None and best_ask is not None:
@@ -377,13 +388,17 @@ class Trader:
         return None
 
     def _compute_tte_years(self, state: TradingState, trader_data: dict) -> float:
-        """time to expiry in years, decreasing over days/ticks."""
+        """Time to expiry in years, decreasing as we progress through days/ticks."""
         day = trader_data.get("day", 0)
         tte_days = self.TOTAL_DAYS_TO_EXPIRY - day - (state.timestamp / self.TICKS_PER_DAY)
-        return max(tte_days, 0.01) / 252  # convert to years
+        return max(tte_days, 0.01) / 252  # Convert to years
 
-    def _trade_deep_itm_mm(self, state: TradingState, trader_data: dict, result: dict):
-        """trade deep itm options around intrinsic value."""
+    def _trade_deep_itm_mm(self, state: TradingState, result: dict):
+        """
+        Market-make deep ITM options (VEV_4000) where spreads are 20+ ticks.
+        FV = S - K (intrinsic value; extrinsic ≈ 0 for deep ITM).
+        Strategy: overbid/undercut the book, take mispriced orders.
+        """
         underlying = "VELVETFRUIT_EXTRACT"
         od_u = state.order_depths.get(underlying)
         if not od_u:
@@ -392,7 +407,6 @@ class Trader:
         if S is None:
             return
 
-        # identify deep itm strikes
         MM_STRIKES = {}
         for voucher, K in self.VOUCHER_STRIKES.items():
             od_v = state.order_depths.get(voucher)
@@ -404,16 +418,17 @@ class Trader:
                 continue
 
             intrinsic = S - K
-            if intrinsic > 300:  # deep itm
+            if intrinsic > 300: # Deep ITM
                 extrinsic = v_mid - intrinsic
-                if extrinsic < 20:
+                if extrinsic < 15: # Very little option juice left
                     MM_STRIKES[voucher] = K
 
-        SKEW_FACTOR = 0.02  # per-unit position skew
+        SKEW_FACTOR = 0.02  # Per-unit position skew
 
         for voucher, K in MM_STRIKES.items():
             od_v = state.order_depths.get(voucher)
 
+            # Fair value = intrinsic value
             fv = S - K
             if fv <= 0:
                 continue
@@ -421,7 +436,7 @@ class Trader:
             position = state.position.get(voucher, 0)
             limit = self.position_limits.get(voucher, 300)
 
-            # inventory skew for position control
+            # Inventory skew — push FV to encourage flattening
             skew = -position * SKEW_FACTOR
             fv_skewed = fv + skew
 
@@ -433,7 +448,7 @@ class Trader:
 
             orders: List[Order] = []
 
-            # phase 1: take mispriced orders
+            # ── Phase 1: Take mispriced orders ───────────────────
             for ask_price, ask_vol in sorted(od_v.sell_orders.items()):
                 if ask_price < fv_skewed and buy_cap > 0:
                     qty = min(-ask_vol, buy_cap)
@@ -446,14 +461,16 @@ class Trader:
                     orders.append(Order(voucher, bid_price, -qty))
                     sell_cap -= qty
 
-            # phase 2: passive quotes inside spread
+            # ── Phase 2: Passive quotes inside the spread ────────
             fv_int = round(fv_skewed)
 
             if buy_cap > 0:
+                # Overbid: post just above best_bid but below FV
                 our_bid = min(best_bid + 1, fv_int - 1)
                 orders.append(Order(voucher, our_bid, buy_cap))
 
             if sell_cap > 0:
+                # Undercut: post just below best_ask but above FV
                 our_ask = max(best_ask - 1, fv_int + 1)
                 orders.append(Order(voucher, our_ask, -sell_cap))
 
@@ -461,11 +478,21 @@ class Trader:
                 result[voucher] = orders
 
     def trade_vouchers_and_hedge(self, state: TradingState, trader_data: dict, result: dict):
-        """iv scalping using smile-fitted black-scholes fair values."""
-        underlying = "VELVETFRUIT_EXTRACT"
-        MIN_EXTRINSIC = 10  # min extrinsic value for reliable iv
+        """
+        IV Scalping — exploits negative autocorrelation in price deviations
+        from the smile-fitted BS fair value.
 
-        # get underlying price
+        Pipeline:
+        1. Compute IV for each voucher from its market mid-price
+        2. Fit a quadratic smile (IV vs moneyness) across all strikes
+        3. For each tradeable strike: BS_fair = BS(S, K, T, fitted_IV)
+        4. Scalp deviations: buy when market < BS_fair, sell when market > BS_fair
+        5. Delta-hedge the aggregate position with the underlying
+        """
+        underlying = "VELVETFRUIT_EXTRACT"
+        MIN_EXTRINSIC = 10  # Min extrinsic value to consider a strike for scalping
+
+        # ── Get underlying price ────────────────────────────────
         od_u = state.order_depths.get(underlying)
         if not od_u:
             return
@@ -475,11 +502,13 @@ class Trader:
 
         T = self._compute_tte_years(state, trader_data)
 
-        # compute iv for all strikes used in smile fit
-        fit_ms = []
-        fit_ivs = []
-        strike_data = {}
-        extrinsic_map = {}
+        # ── Compute IV for ALL strikes (for smile fitting) ──────
+        # Filter out options with < 2 ticks of extrinsic value — their
+        # IV is unreliable (as per past team: "outliers were disregarded")
+        fit_ms = []     # moneyness values for fitting
+        fit_ivs = []    # IV values for fitting
+        strike_data = {}  # voucher -> (moneyness, iv, market_mid)
+        extrinsic_map = {}  # voucher -> extrinsic value (for strike selection)
 
         for voucher, K in self.VOUCHER_STRIKES.items():
             od_v = state.order_depths.get(voucher)
@@ -489,10 +518,12 @@ class Trader:
             if v_mid is None or v_mid <= 0.5:
                 continue
 
+            # Skip if extrinsic value too low (IV unreliable)
             intrinsic = max(0, S - K)
             extrinsic = v_mid - intrinsic
             if extrinsic < 2:
                 continue
+            # Skip deep ITM — their IV is unreliable and distorts the smile
             if intrinsic > 300:
                 continue
 
@@ -506,38 +537,25 @@ class Trader:
                 strike_data[voucher] = (m, iv, v_mid)
 
         if len(fit_ms) < 3:
-            return
+            return  # Not enough data to fit a smile
 
-        # select one best strike with hysteresis
-        HYSTERESIS = 30
-
-        scalp_candidates = []
+        # ── Multi-strike scalping ─────────────────────────────────
+        # Mark 22 systematically sells options across ALL OTM/near-ATM
+        # strikes. Scalp ALL eligible strikes to capture this flow.
+        # Exclude strikes where intrinsic > 150: these are in the
+        # "dead zone" (VEV_5100) — too deep for smile accuracy,
+        # too shallow for intrinsic-only pricing (_trade_deep_itm_mm).
+        SCALP_STRIKES = {}
         for voucher, K in self.VOUCHER_STRIKES.items():
+            intrinsic_k = max(0, S - K)
             if (voucher in strike_data
                 and extrinsic_map.get(voucher, 0) >= MIN_EXTRINSIC
-                and S > K):
-                scalp_candidates.append((abs(S - K), voucher, K))
+                and S > K
+                and intrinsic_k < 150
+                and voucher != "VEV_5100"):  # Hardcode exclude: loses -22K in backtest
+                SCALP_STRIKES[voucher] = K
 
-        scalp_candidates.sort()
-
-        SCALP_STRIKES = {}
-        if scalp_candidates:
-            prev_strike = trader_data.get("active_scalp_strike")
-            best_dist, best_voucher, best_K = scalp_candidates[0]
-
-            if prev_strike and prev_strike in strike_data:
-                prev_K = self.VOUCHER_STRIKES[prev_strike]
-                prev_dist = abs(S - prev_K)
-                if prev_dist - best_dist >= HYSTERESIS:
-                    SCALP_STRIKES = {best_voucher: best_K}
-                    trader_data["active_scalp_strike"] = best_voucher
-                else:
-                    SCALP_STRIKES = {prev_strike: prev_K}
-            else:
-                SCALP_STRIKES = {best_voucher: best_K}
-                trader_data["active_scalp_strike"] = best_voucher
-
-        # fit quadratic smile: iv = a*m^2 + b*m + c
+        # ── Fit quadratic smile: IV = a*m^2 + b*m + c ──────────
         n = len(fit_ms)
         s0, s1 = n, sum(fit_ms)
         s2 = sum(m * m for m in fit_ms)
@@ -565,14 +583,14 @@ class Trader:
                 - s3 * (s3 * sy - smy * s2)
                 + sm2y * (s3 * s1 - s2 * s2)) / det
 
-        # scalp selected strike(s)
+        # ── Scalp each tradeable strike ─────────────────────────
         net_option_delta = 0.0
 
         for voucher, K in SCALP_STRIKES.items():
             od_v = state.order_depths.get(voucher)
 
             if voucher not in strike_data or not od_v:
-                # still track delta for existing positions
+                # Still track delta for existing positions
                 pos = state.position.get(voucher, 0)
                 if pos != 0:
                     m_approx = math.log(S / K)
@@ -583,7 +601,7 @@ class Trader:
             m, actual_iv, market_mid = strike_data[voucher]
             fitted_iv = max(sa * m * m + sb * m + sc, 0.01)
 
-            # bs fair price at smile-implied vol
+            # BS fair price at the SMILE-implied vol
             bs_fair = bs_call_price(S, K, T, fitted_iv)
             delta = bs_delta(S, K, T, fitted_iv)
             fv = round(bs_fair)
@@ -597,7 +615,9 @@ class Trader:
 
             orders: List[Order] = []
 
-            # phase 1: take mispriced orders
+            # ── Phase 1: Take mispriced orders ──────────────────
+            # No threshold — trade EVERY deviation. The negative AC(-0.4)
+            # means deviations reverse, so we scalp both sides.
             for ask_price, ask_vol in sorted(od_v.sell_orders.items()):
                 if ask_price < fv and buy_cap > 0:
                     qty = min(-ask_vol, buy_cap)
@@ -612,7 +632,7 @@ class Trader:
                     sell_cap -= qty
                     net_option_delta -= qty * delta
 
-            # phase 2: post passive quotes at fair +/- 1
+            # ── Phase 2: Post passive quotes at fair ± 1 ────────
             if buy_cap > 0:
                 orders.append(Order(voucher, fv - 1, buy_cap))
             if sell_cap > 0:
@@ -621,76 +641,29 @@ class Trader:
             if orders:
                 result[voucher] = orders
 
-        # vfe strategy is called separately from run()
+        # NOTE: Delta hedge replaced by VFE z-score mean-reversion
+        # (called separately from run())
 
-    def _trade_vfe_passive_mm(self, state: TradingState, _trader_data: dict, result: dict):
-        """passive mm in vfe to absorb mark 55 flow."""
-        product = "VELVETFRUIT_EXTRACT"
-        MARK = "Mark 55"
-        MAX_POS = 75
-        SKEW_FACTOR = 0.08   # inventory skew per unit
+    def _trade_vfe_predator(self, state: TradingState, trader_data: dict, result: dict):
+        """
+        VFE z-score mean-reversion with Mark 67 hold bias.
 
-        od = state.order_depths.get(product)
-        if not od:
-            return
+        Data-validated findings:
+        - Z-score alone: +9K PnL (proven baseline)
+        - Always-on passive quotes: LOSE money (Mark 55 adverse selection, 3254 lots)
+        - M67 cooldown 5000: too long, holds through Day 3's -64 tick drop
+        - Crossing spread on M67: -2.38 ticks, 21% WR (never do this)
 
-        best_bid = max(od.buy_orders.keys()) if od.buy_orders else None
-        best_ask = min(od.sell_orders.keys()) if od.sell_orders else None
-        if best_bid is None or best_ask is None:
-            return
-
-        mid = (best_bid + best_ask) / 2
-        position = state.position.get(product, 0)
-        limit = self.position_limits[product]
-
-        # check if mark 55 was active last tick
-        mark55_buying = any(t.buyer == MARK for t in state.market_trades.get(product, []))
-        mark55_selling = any(t.seller == MARK for t in state.market_trades.get(product, []))
-
-        # inventory skew pulls quotes toward flat
-        skew = -position * SKEW_FACTOR
-        fv = mid + skew
-
-        buy_cap = min(MAX_POS - position, limit - position)
-        sell_cap = min(MAX_POS + position, limit + position)
-
-        orders: List[Order] = []
-
-        # phase 1: take orders mispriced vs fv
-        for ask_price, ask_vol in sorted(od.sell_orders.items()):
-            if ask_price < fv and buy_cap > 0:
-                qty = min(-ask_vol, buy_cap)
-                orders.append(Order(product, ask_price, qty))
-                buy_cap -= qty
-
-        for bid_price, bid_vol in sorted(od.buy_orders.items(), reverse=True):
-            if bid_price > fv and sell_cap > 0:
-                qty = min(bid_vol, sell_cap)
-                orders.append(Order(product, bid_price, -qty))
-                sell_cap -= qty
-
-        # phase 2: passive quotes; tighten when mark 55 is active
-        spread = 1 if (mark55_buying or mark55_selling) else 2
-
-        if buy_cap > 0:
-            our_bid = min(best_bid + 1, round(fv) - spread)
-            orders.append(Order(product, our_bid, buy_cap))
-
-        if sell_cap > 0:
-            our_ask = max(best_ask - 1, round(fv) + spread)
-            orders.append(Order(product, our_ask, -sell_cap))
-
-        if orders:
-            result[product] = orders
-
-    def _trade_vfe_zscore_minimal(self, state: TradingState, trader_data: dict, result: dict):
-        """minimal vfe mean-reversion with conservative sizing."""
+        Strategy: pure z-score, M67 only suppresses flattening briefly.
+        """
         underlying = "VELVETFRUIT_EXTRACT"
         VWAP_WINDOW = 100
-        Z_ENTRY = 2.0         # higher threshold = fewer entries
-        Z_EXIT = 0.5          # close sooner
-        MAX_POS = 50          # smaller position limit
-        TRADE_SIZE = 20       # smaller increments
+
+        # ── Parameters ──────────────────────────────────────────
+        M67_COOLDOWN = 1000    # Short: only suppress flatten briefly after M67
+        BASE_TRADE_SIZE = 50   # Normal z-score trade size
+        Z_ENTRY = 1.5          # Enter on z-score extreme
+        Z_EXIT = 0.0
 
         od_u = state.order_depths.get(underlying)
         if not od_u:
@@ -700,9 +673,31 @@ class Trader:
         if S is None:
             return
 
+        limit = self.position_limits.get(underlying, 200)
         current_pos = state.position.get(underlying, 0)
 
-        # update rolling vwap
+        best_bid = max(od_u.buy_orders.keys()) if od_u.buy_orders else None
+        best_ask = min(od_u.sell_orders.keys()) if od_u.sell_orders else None
+
+        if best_bid is None or best_ask is None:
+            return
+
+        # ── Detect Mark 67 activity ──────────────────────────────
+        m67_detected = False
+        for trade in state.market_trades.get(underlying, []):
+            if hasattr(trade, 'buyer') and trade.buyer == "Mark 67":
+                m67_detected = True
+
+        # Persist detection with cooldown
+        last_m67_ts = trader_data.get("last_m67_ts", -999999)
+        if m67_detected:
+            last_m67_ts = state.timestamp
+        trader_data["last_m67_ts"] = last_m67_ts
+
+        # M67 hold: only suppresses flattening of longs
+        m67_hold = (state.timestamp - last_m67_ts) < M67_COOLDOWN
+
+        # ── Update rolling VWAP ──────────────────────────────────
         tick_pv = 0.0
         tick_vol = 0.0
 
@@ -720,7 +715,6 @@ class Trader:
 
         vwap_pv = trader_data.get("vwap_pv", [])
         vwap_pv.append([tick_pv, tick_vol])
-
         if len(vwap_pv) > VWAP_WINDOW:
             vwap_pv = vwap_pv[-VWAP_WINDOW:]
         trader_data["vwap_pv"] = vwap_pv
@@ -734,9 +728,10 @@ class Trader:
         if len(vwap_pv) < 20:
             return
 
+        # ── Compute VWAP and z-score ─────────────────────────────
         total_pv = sum(x[0] for x in vwap_pv)
-        total_vol = sum(x[1] for x in vwap_pv)
-        vwap = total_pv / total_vol if total_vol > 0 else S
+        total_vol_hist = sum(x[1] for x in vwap_pv)
+        vwap = total_pv / total_vol_hist if total_vol_hist > 0 else S
 
         mean_p = sum(vwap_prices) / len(vwap_prices)
         var_p = sum((p - mean_p) ** 2 for p in vwap_prices) / len(vwap_prices)
@@ -744,146 +739,32 @@ class Trader:
 
         z = (S - vwap) / std_p if std_p > 0.1 else 0
 
+        # ── Generate orders ──────────────────────────────────────
         orders: List[Order] = []
+        buy_capacity = limit - current_pos
+        sell_capacity = limit + current_pos
 
-        best_bid = max(od_u.buy_orders.keys()) if od_u.buy_orders else None
-        best_ask = min(od_u.sell_orders.keys()) if od_u.sell_orders else None
+        # ── Pure z-score entries ─────────────────────────────────
+        if z < -Z_ENTRY and buy_capacity > 0:
+            qty = min(BASE_TRADE_SIZE, buy_capacity)
+            orders.append(Order(underlying, best_bid + 1, qty))
+            buy_capacity -= qty
 
-        if z < -Z_ENTRY and current_pos < MAX_POS:
-            qty = min(TRADE_SIZE, MAX_POS - current_pos)
-            if qty > 0 and best_bid is not None:
-                orders.append(Order(underlying, best_bid + 1, qty))
+        elif z > Z_ENTRY and sell_capacity > 0:
+            qty = min(BASE_TRADE_SIZE, sell_capacity)
+            orders.append(Order(underlying, best_ask - 1, -qty))
+            sell_capacity -= qty
 
-        elif z > Z_ENTRY and current_pos > -MAX_POS:
-            qty = min(TRADE_SIZE, MAX_POS + current_pos)
-            if qty > 0 and best_ask is not None:
+        # ── Flatten — suppress during M67 hold ───────────────────
+        elif current_pos > 0 and z > Z_EXIT and not m67_hold:
+            qty = min(current_pos, sell_capacity)
+            if qty > 0:
                 orders.append(Order(underlying, best_ask - 1, -qty))
 
-        elif current_pos > 0 and z > Z_EXIT:
-            if best_ask is not None:
-                orders.append(Order(underlying, best_ask - 1, -min(current_pos, TRADE_SIZE)))
-
         elif current_pos < 0 and z < -Z_EXIT:
-            if best_bid is not None:
-                orders.append(Order(underlying, best_bid + 1, min(-current_pos, TRADE_SIZE)))
+            qty = min(-current_pos, buy_capacity)
+            if qty > 0:
+                orders.append(Order(underlying, best_bid + 1, qty))
 
         if orders:
             result[underlying] = orders
-
-    def _trade_butterfly(self, state: TradingState, trader_data: dict, result: dict):
-        """sell butterfly spread when market is above model value."""
-        BF_SELL_THRESHOLD = 1.5  # sell when market > model by this much
-        MAX_BF_POSITION = 50     # max butterfly position per leg
-
-        # get underlying price
-        od_u = state.order_depths.get("VELVETFRUIT_EXTRACT")
-        if not od_u:
-            return
-        S = self._get_mid(od_u)
-        if S is None:
-            return
-
-        T = self._compute_tte_years(state, trader_data)
-
-        # get option order depths
-        od_5100 = state.order_depths.get("VEV_5100")
-        od_5200 = state.order_depths.get("VEV_5200")
-        od_5300 = state.order_depths.get("VEV_5300")
-
-        if not all([od_5100, od_5200, od_5300]):
-            return
-
-        # get mid prices
-        mid_5100 = self._get_mid(od_5100)
-        mid_5200 = self._get_mid(od_5200)
-        mid_5300 = self._get_mid(od_5300)
-
-        if not all([mid_5100, mid_5200, mid_5300]):
-            return
-
-        # calculate market butterfly
-        bf_market = mid_5100 - 2 * mid_5200 + mid_5300
-
-        # calculate model butterfly
-        IV = 0.27  # calibrated iv
-        bf_theo = (bs_call_price(S, 5100, T, IV)
-                   - 2 * bs_call_price(S, 5200, T, IV)
-                   + bs_call_price(S, 5300, T, IV))
-
-        mispricing = bf_market - bf_theo
-
-        # current positions
-        pos_5100 = state.position.get("VEV_5100", 0)
-        pos_5200 = state.position.get("VEV_5200", 0)
-        pos_5300 = state.position.get("VEV_5300", 0)
-
-        # infer current butterfly position
-        bf_pos = min(-pos_5100, pos_5200 // 2, -pos_5300) if pos_5100 <= 0 and pos_5300 <= 0 and pos_5200 >= 0 else 0
-
-        orders_5100: List[Order] = []
-        orders_5200: List[Order] = []
-        orders_5300: List[Order] = []
-
-        # sell butterfly if overpriced and we have room
-        if mispricing > BF_SELL_THRESHOLD and bf_pos < MAX_BF_POSITION:
-            qty = min(10, MAX_BF_POSITION - bf_pos)  # trade in small increments
-
-            # check all legs fit position limits
-            limit_5100 = self.position_limits.get("VEV_5100", 300)
-            limit_5200 = self.position_limits.get("VEV_5200", 300)
-            limit_5300 = self.position_limits.get("VEV_5300", 300)
-
-            can_sell_5100 = limit_5100 + pos_5100 >= qty
-            can_buy_5200 = limit_5200 - pos_5200 >= 2 * qty
-            can_sell_5300 = limit_5300 + pos_5300 >= qty
-
-            if can_sell_5100 and can_buy_5200 and can_sell_5300:
-                # sell c5100
-                best_bid_5100 = max(od_5100.buy_orders.keys()) if od_5100.buy_orders else None
-                if best_bid_5100:
-                    orders_5100.append(Order("VEV_5100", best_bid_5100, -qty))
-
-                # buy 2x c5200
-                best_ask_5200 = min(od_5200.sell_orders.keys()) if od_5200.sell_orders else None
-                if best_ask_5200:
-                    orders_5200.append(Order("VEV_5200", best_ask_5200, 2 * qty))
-
-                # sell c5300
-                best_bid_5300 = max(od_5300.buy_orders.keys()) if od_5300.buy_orders else None
-                if best_bid_5300:
-                    orders_5300.append(Order("VEV_5300", best_bid_5300, -qty))
-
-        # close butterfly if mispricing is gone
-        elif mispricing < 0.5 and bf_pos > 0:
-            qty = min(10, bf_pos)
-
-            # buy back c5100
-            best_ask_5100 = min(od_5100.sell_orders.keys()) if od_5100.sell_orders else None
-            if best_ask_5100:
-                orders_5100.append(Order("VEV_5100", best_ask_5100, qty))
-
-            # sell 2x c5200
-            best_bid_5200 = max(od_5200.buy_orders.keys()) if od_5200.buy_orders else None
-            if best_bid_5200:
-                orders_5200.append(Order("VEV_5200", best_bid_5200, -2 * qty))
-
-            # buy back c5300
-            best_ask_5300 = min(od_5300.sell_orders.keys()) if od_5300.sell_orders else None
-            if best_ask_5300:
-                orders_5300.append(Order("VEV_5300", best_ask_5300, qty))
-
-        # merge with existing orders
-        if orders_5100:
-            if "VEV_5100" not in result:
-                result["VEV_5100"] = []
-            result["VEV_5100"].extend(orders_5100)
-
-        if orders_5200:
-            if "VEV_5200" not in result:
-                result["VEV_5200"] = []
-            result["VEV_5200"].extend(orders_5200)
-
-        if orders_5300:
-            if "VEV_5300" not in result:
-                result["VEV_5300"] = []
-            result["VEV_5300"].extend(orders_5300)
