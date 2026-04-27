@@ -802,7 +802,7 @@ class Trader:
             orders.append(Order(underlying, best_ask - 1, -ask_qty))
 
         # ── Post passive bid to buy from Mark 49 / Mark 22 ───────
-        # Mark 49 sells ~1,071 lots at the ask. Mark 55 provides 
+        # Mark 49 sells ~1,071 lots at the ask. Mark 55 provides
         # two-sided liquidity. Our bid collects cheap inventory
         # that Mark 67 later lifts from our ask.
         if buy_capacity > 0:
