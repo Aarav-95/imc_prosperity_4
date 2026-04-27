@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Backtest Dashboard</title>
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+    <style>
+        :root {
+            --bg-base: #121212;
+            --bg-panel: #1e1e1e;
+            --bg-accent: #2c2c2c;
+            --text-main: #d1d4dc;
+            --text-muted: #888;
+            --border: #333;
+            --buy: #089981;
+            --sell: #f23645;
+            --highlight: rgba(8, 153, 129, 0.25);
+        }
+        body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; height: 100vh; background-color: var(--bg-base); color: var(--text-main); }
+
+        /* Top Navigation */
+        .header { padding: 15px 20px; background-color: var(--bg-panel); border-bottom: 1px solid var(--border); display: flex; gap: 20px; align-items: center; box-shadow: 0 4px 6px rgba(0,0,0,0.3); z-index: 10; }
+        .header h1 { margin: 0; font-size: 18px; color: #fff; margin-right: 20px; }
+        .control-group { display: flex; align-items: center; gap: 8px; }
+        select, button { background-color: var(--bg-accent); color: var(--text-main); border: 1px solid var(--border); padding: 8px 12px; border-radius: 4px; font-size: 14px; outline: none; }
+        button { cursor: pointer; transition: background 0.2s; font-weight: bold; }
+        button:hover { background-color: #444; }
+        input[type="file"] { display: none; }
+        .upload-btn { background-color: #2962FF; color: white; border: none; }
+        .upload-btn:hover { background-color: #1E4ED8; }
+
+        /* Main Workspace */
+        .workspace { display: flex; flex: 1; overflow: hidden; }
+
+        /* Left: Chart Area */
+        .chart-section { flex: 3; display: flex; flex-direction: column; border-right: 1px solid var(--border); position: relative; }
+        #tvchart { flex: 1; width: 100%; height: 100%; }
+
+        .legend-overlay { position: absolute; top: 15px; left: 15px; z-index: 5; background: rgba(30, 30, 30, 0.8); padding: 10px; border-radius: 6px; border: 1px solid var(--border); pointer-events: none; }
+        .legend-title { font-size: 14px; font-weight: bold; margin-bottom: 5px; color: #fff; }
+        .legend-item { font-size: 12px; display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+
+        /* Top Right Chart Controls */
+        .chart-controls { position: absolute; top: 15px; right: 15px; z-index: 5; }
+        #btnResetZoom { background-color: rgba(41, 98, 255, 0.8); border: 1px solid #2962FF; padding: 6px 12px; }
+        #btnResetZoom:hover { background-color: rgba(41, 98, 255, 1); }
+
+        /* Custom Hover Tooltip */
+        .floating-tooltip {
+            position: absolute;
+            display: none;
+            padding: 12px;
+            background: rgba(20, 20, 20, 0.95);
+            border: 1px solid var(--border);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.5);
+            border-radius: 6px;
+            color: var(--text-main);
+            font-size: 12px;
+            z-index: 1000;
+            pointer-events: none;
+            width: 160px;
+        }
+        .tt-row { display: flex; justify-content: space-between; margin-bottom: 5px; }
+        .tt-trades-title { font-weight: bold; margin-top: 8px; color: var(--text-muted); margin-bottom: 4px; text-transform: uppercase; font-size: 10px; border-bottom: 1px solid var(--border); padding-bottom: 4px;}
+        .tt-trade { display: flex; justify-content: space-between; color: #fff; margin-bottom: 3px; font-family: monospace;}
+        .tt-trade .qty { color: var(--buy); font-weight: bold; }
+
+        /* Tick Controller */
+        .tick-controller { padding: 15px; background-color: var(--bg-panel); border-top: 1px solid var(--border); display: flex; align-items: center; gap: 15px; }
+        .tick-controller input[type="range"] { flex: 1; cursor: pointer; }
+        .tick-display { font-family: monospace; font-size: 16px; background: var(--bg-accent); padding: 5px 10px; border-radius: 4px; border: 1px solid var(--border); }
+
+        /* Right: Sidebar */
+        .sidebar { flex: 1.2; display: flex; flex-direction: column; background-color: var(--bg-base); min-width: 350px; max-width: 450px; }
+
+        .panel { display: flex; flex-direction: column; flex: 1; border-bottom: 1px solid var(--border); overflow: hidden; }
+        .panel-header { background: var(--bg-panel); padding: 10px 15px; font-size: 13px; font-weight: bold; text-transform: uppercase; color: var(--text-muted); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; }
+        .table-container { flex: 1; overflow-y: auto; padding: 10px; }
+
+        table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+        th, td { padding: 6px 8px; text-align: right; border-bottom: 1px solid rgba(255,255,255,0.05); }
+        th { color: var(--text-muted); font-weight: normal; font-size: 11px; position: sticky; top: -10px; background: var(--bg-base); z-index: 2;}
+        td:first-child, th:first-child { text-align: left; }
+
+        .color-ask { color: var(--sell); }
+        .color-bid { color: var(--buy); }
+        .color-mid { color: #fff; font-weight: bold; background: rgba(255,255,255,0.05); text-align: center; }
+
+        .current-tick-trade { background-color: var(--highlight); }
+
+        /* Scrollbars */
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: var(--bg-base); }
+        ::-webkit-scrollbar-thumb { background: #444; border-radius: 3px; }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>Backtest Dashboard</h1>
+
+        <div class="control-group">
+            <label for="csvUpload" class="upload-btn control-group" style="padding: 8px 12px; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: bold;">
+                + Add Data
+            </label>
+            <input type="file" id="csvUpload" multiple accept=".csv" />
+        </div>
+
+        <div class="control-group">
+            <label>Product:</label>
+            <select id="productSelect" disabled><option>Load data first...</option></select>
+        </div>
+
+        <div class="control-group">
+            <label>Day:</label>
+            <select id="daySelect" disabled></select>
+        </div>
+    </div>
+
+    <div class="workspace">
+        <div class="chart-section">
+            <div class="legend-overlay">
+                <div class="legend-title" id="legendTitle">Mid Price Chart</div>
+                <div class="legend-item"><span class="dot" style="background: #2962FF;"></span> Mid Price Line</div>
+                <div class="legend-item"><span class="dot" style="background: var(--buy);"></span> Trades Occurred</div>
+                <div class="legend-item" style="color: var(--text-muted); margin-top: 5px;">*Scroll to zoom, drag to pan</div>
+            </div>
+
+            <div class="chart-controls">
+                <button id="btnResetZoom">Reset Zoom</button>
+            </div>
+
+            <div id="tvchart"></div>
+
+            <div id="customTooltip" class="floating-tooltip"></div>
+
+            <div class="tick-controller">
+                <button id="btnPrev">◄ Prev Tick</button>
+                <input type="range" id="tickSlider" min="0" max="0" value="0" disabled>
+                <button id="btnNext">Next Tick ►</button>
+                <div class="tick-display" id="tickLabel">Tick: 0</div>
+            </div>
+        </div>
+
+        <div class="sidebar">
+            <div class="panel" style="flex: 0.8;">
+                <div class="panel-header">Live Order Book (LOB)</div>
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr><th>Level</th><th style="text-align: right;">Price</th><th>Volume</th></tr>
+                        </thead>
+                        <tbody id="obBody">
+                            <tr><td colspan="3" style="text-align: center; color: #888;">Select a tick to view</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="panel" style="flex: 1.2;">
+                <div class="panel-header">
+                    <span>Trade Log (Accumulating)</span>
+                    <span id="tradeCount" style="font-weight: normal; font-size: 11px;">0 Trades</span>
+                </div>
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr><th>Tick</th><th>Buyer</th><th>Seller</th><th>Price</th><th>Qty</th></tr>
+                        </thead>
+                        <tbody id="tradeLogBody">
+                            <tr><td colspan="5" style="text-align: center; color: #888;">No trades yet</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Data Stores
+        let allPrices = [];
+        let allTrades = [];
+        let uniqueProducts = new Set();
+        let uniqueDays = new Set();
+
+        let currentTimestamps = [];
+        let currentPricesMap = new Map();
+        let currentTradesMap = new Map();
+        let currentFilteredTrades = [];
+
+        let crosshairDataMap = new Map();
+
+        // Chart Objects
+        const chartContainer = document.getElementById('tvchart');
+        const chart = LightweightCharts.createChart(chartContainer, {
+            layout: { background: { type: 'solid', color: '#121212' }, textColor: '#d1d4dc' },
+            grid: { vertLines: { color: '#2b2b43' }, horzLines: { color: '#2b2b43' } },
+            crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+            timeScale: {
+                timeVisible: true,
+                secondsVisible: true,
+                minBarSpacing: 0.001
+            },
+        });
+
+        let lineSeries = chart.addLineSeries({ color: '#2962FF', lineWidth: 2, crosshairMarkerVisible: true });
+
+        // DOM Elements
+        const fileInput = document.getElementById('csvUpload');
+        const productSelect = document.getElementById('productSelect');
+        const daySelect = document.getElementById('daySelect');
+        const slider = document.getElementById('tickSlider');
+        const btnPrev = document.getElementById('btnPrev');
+        const btnNext = document.getElementById('btnNext');
+        const btnResetZoom = document.getElementById('btnResetZoom');
+        const tooltip = document.getElementById('customTooltip');
+
+        // 1. File Upload Processing
+        fileInput.addEventListener('change', async (e) => {
+            const files = Array.from(e.target.files);
+            if(files.length === 0) return;
+
+            document.getElementById('legendTitle').innerText = "Loading data...";
+
+            for(let file of files) {
+                await new Promise((resolve) => {
+                    Papa.parse(file, {
+                        header: true,
+                        delimiter: ";",
+                        skipEmptyLines: true,
+                        complete: function(results) {
+                            const data = results.data;
+                            if(file.name.includes('prices')) {
+                                allPrices.push(...data);
+                            } else if (file.name.includes('trades')) {
+                                const dayMatch = file.name.match(/day_(\d+)/);
+                                const dayNum = dayMatch ? dayMatch[1] : 1;
+                                data.forEach(row => row.day = dayNum);
+                                allTrades.push(...data);
+                            }
+                            resolve();
+                        }
+                    });
+                });
+            }
+            populateSelectors();
+            document.getElementById('legendTitle').innerText = "Mid Price Chart";
+        });
+
+        // 2. Populate Dropdowns
+        function populateSelectors() {
+            allPrices.forEach(row => {
+                if(row.product) uniqueProducts.add(row.product);
+                if(row.day) uniqueDays.add(row.day);
+            });
+
+            productSelect.innerHTML = '';
+            Array.from(uniqueProducts).sort().forEach(p => productSelect.add(new Option(p, p)));
+
+            daySelect.innerHTML = '';
+            Array.from(uniqueDays).sort((a,b)=>parseInt(a)-parseInt(b)).forEach(d => daySelect.add(new Option(`Day ${d}`, d)));
+
+            productSelect.disabled = false;
+            daySelect.disabled = false;
+
+            productSelect.addEventListener('change', refreshDashboard);
+            daySelect.addEventListener('change', refreshDashboard);
+
+            refreshDashboard();
+        }
+
+        // 3. Refresh Dashboard with Active Selection
+        function refreshDashboard() {
+            const product = productSelect.value;
+            const day = daySelect.value;
+            if(!product || !day) return;
+
+            document.getElementById('legendTitle').innerText = `${product} (Day ${day})`;
+
+            let rawFilteredPrices = allPrices.filter(p => p.product === product && p.day == day);
+            currentFilteredTrades = allTrades.filter(t => t.symbol === product && t.day == day);
+            currentFilteredTrades.sort((a,b) => parseInt(a.timestamp) - parseInt(b.timestamp));
+
+            currentTimestamps = [];
+            currentPricesMap.clear();
+            currentTradesMap.clear();
+            crosshairDataMap.clear();
+
+            // DEDUPLICATE PRICES: Map guarantees only one price entry per exact timestamp
+            rawFilteredPrices.forEach(p => {
+                const ts = parseInt(p.timestamp);
+                if (!isNaN(ts)) {
+                    currentPricesMap.set(ts, p);
+                }
+            });
+
+            // GROUP TRADES BY TIMESTAMP
+            currentFilteredTrades.forEach(t => {
+                const ts = parseInt(t.timestamp);
+                if (!isNaN(ts)) {
+                    if(!currentTradesMap.has(ts)) currentTradesMap.set(ts, []);
+                    currentTradesMap.get(ts).push(t);
+                }
+            });
+
+            // Create strictly sorted array of unique timestamps
+            currentTimestamps = Array.from(currentPricesMap.keys()).sort((a,b) => a - b);
+
+            const BASE_TS = Math.floor(new Date('2024-01-01T00:00:00Z').getTime() / 1000);
+            const chartData = [];
+
+            // BUILD CHART DATA (Line Series)
+            currentTimestamps.forEach(ts => {
+                const p = currentPricesMap.get(ts);
+                const chartTime = BASE_TS + (parseInt(p.day) * 86400) + (ts / 100);
+
+                crosshairDataMap.set(chartTime, {
+                    rawTs: ts,
+                    mid: p.mid_price,
+                    bid: p.bid_price_1 || 'N/A',
+                    ask: p.ask_price_1 || 'N/A',
+                    trades: currentTradesMap.get(ts) || []
+                });
+
+                if (!isNaN(parseFloat(p.mid_price))) {
+                    chartData.push({ time: chartTime, value: parseFloat(p.mid_price) });
+                }
+            });
+
+            lineSeries.setData(chartData);
+
+            // BUILD MARKERS (Deduplicated so Library doesn't crash)
+            const markers = [];
+            currentTradesMap.forEach((tradesArray, ts) => {
+                // Only place a marker if there is a corresponding price bar for it to sit on!
+                if (tradesArray.length > 0 && currentPricesMap.has(ts)) {
+                    const firstTrade = tradesArray[0];
+                    markers.push({
+                        time: BASE_TS + (parseInt(firstTrade.day) * 86400) + (ts / 100),
+                        position: 'inBar',
+                        color: '#089981',
+                        shape: 'circle'
+                    });
+                }
+            });
+
+            markers.sort((a,b) => a.time - b.time);
+            lineSeries.setMarkers(markers);
+
+            chart.timeScale().fitContent();
+
+            // Initialize Slider
+            slider.disabled = false;
+            slider.min = 0;
+            slider.max = currentTimestamps.length - 1;
+            slider.value = 0;
+
+            updateTickView(0);
+        }
+
+        // 4. Custom Hover Tooltip Logic
+        chart.subscribeCrosshairMove(param => {
+            if (
+                param.point === undefined ||
+                !param.time ||
+                param.point.x < 0 ||
+                param.point.x > chartContainer.clientWidth ||
+                param.point.y < 0 ||
+                param.point.y > chartContainer.clientHeight
+            ) {
+                tooltip.style.display = 'none';
+                return;
+            }
+
+            const data = crosshairDataMap.get(param.time);
+            if (!data) return;
+
+            let tradesHtml = '';
+            if (data.trades.length > 0) {
+                tradesHtml = `<div class="tt-trades-title">Bot Executions</div>`;
+                data.trades.forEach(t => {
+                    tradesHtml += `<div class="tt-trade"><span>${t.price}</span> <span class="qty">${t.quantity}x</span></div>`;
+                });
+            } else {
+                tradesHtml = `<div class="tt-trades-title" style="border:none">No Executions</div>`;
+            }
+
+            tooltip.innerHTML = `
+                <div class="tt-row"><span style="color:#888">Tick:</span> <span>${data.rawTs}</span></div>
+                <div class="tt-row"><span style="color:#888">Mid:</span> <span style="font-weight:bold">${data.mid}</span></div>
+                <div class="tt-row"><span style="color:#888">Ask 1:</span> <span class="color-ask">${data.ask}</span></div>
+                <div class="tt-row"><span style="color:#888">Bid 1:</span> <span class="color-bid">${data.bid}</span></div>
+                ${tradesHtml}
+            `;
+
+            tooltip.style.display = 'block';
+            let left = param.point.x + 15;
+            let top = param.point.y + 15;
+
+            if (left + tooltip.clientWidth > chartContainer.clientWidth) { left = param.point.x - tooltip.clientWidth - 15; }
+            if (top + tooltip.clientHeight > chartContainer.clientHeight) { top = param.point.y - tooltip.clientHeight - 15; }
+
+            tooltip.style.left = left + 'px';
+            tooltip.style.top = top + 'px';
+        });
+
+        // 5. Update Sidebar View at a specific Tick
+        function updateTickView(index) {
+            const ts = currentTimestamps[index];
+            if(ts === undefined) return;
+
+            document.getElementById('tickLabel').innerText = `Tick: ${ts}`;
+            const pData = currentPricesMap.get(ts);
+
+            // Render Orderbook
+            const ob = document.getElementById('obBody');
+            ob.innerHTML = '';
+            if(pData) {
+                for(let i=3; i>=1; i--) {
+                    if(pData[`ask_price_${i}`] && pData[`ask_volume_${i}`]) {
+                        ob.innerHTML += `<tr><td>Ask ${i}</td><td class="color-ask">${pData[`ask_price_${i}`]}</td><td>${pData[`ask_volume_${i}`]}</td></tr>`;
+                    }
+                }
+                ob.innerHTML += `<tr><td colspan="3" class="color-mid">Mid: ${pData.mid_price}</td></tr>`;
+                for(let i=1; i<=3; i++) {
+                    if(pData[`bid_price_${i}`] && pData[`bid_volume_${i}`]) {
+                        ob.innerHTML += `<tr><td>Bid ${i}</td><td class="color-bid">${pData[`bid_price_${i}`]}</td><td>${pData[`bid_volume_${i}`]}</td></tr>`;
+                    }
+                }
+            }
+
+            // Render Accumulating Trades
+            const trBody = document.getElementById('tradeLogBody');
+            const tradeCountSpan = document.getElementById('tradeCount');
+            trBody.innerHTML = '';
+
+            let pastTrades = currentFilteredTrades.filter(t => parseInt(t.timestamp) <= ts);
+            tradeCountSpan.innerText = `${pastTrades.length} Trades`;
+
+            if(pastTrades.length === 0) {
+                trBody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: #666;">No trades yet</td></tr>`;
+            } else {
+                const MAX_TRADES_RENDER = 2000;
+                let tradesToRender = pastTrades.slice(-MAX_TRADES_RENDER).reverse();
+
+                let rowsHtml = '';
+                tradesToRender.forEach(trade => {
+                    const tradeTs = parseInt(trade.timestamp);
+                    const isCurrentTick = (tradeTs === ts);
+                    const rowClass = isCurrentTick ? 'class="current-tick-trade"' : '';
+
+                    rowsHtml += `<tr ${rowClass}>
+                        <td style="color: #888">${tradeTs}</td>
+                        <td>${trade.buyer}</td>
+                        <td>${trade.seller}</td>
+                        <td style="color: #fff">${trade.price}</td>
+                        <td class="color-bid">${trade.quantity}</td>
+                    </tr>`;
+                });
+                trBody.innerHTML = rowsHtml;
+            }
+        }
+
+        // Listeners
+        btnResetZoom.addEventListener('click', () => { chart.timeScale().fitContent(); });
+        slider.addEventListener('input', (e) => updateTickView(parseInt(e.target.value)));
+
+        btnPrev.addEventListener('click', () => {
+            let val = parseInt(slider.value);
+            if(val > 0) { slider.value = val - 1; updateTickView(val - 1); }
+        });
+
+        btnNext.addEventListener('click', () => {
+            let val = parseInt(slider.value);
+            if(val < currentTimestamps.length - 1) { slider.value = val + 1; updateTickView(val + 1); }
+        });
+
+        window.addEventListener('resize', () => {
+            chart.resize(chartContainer.clientWidth, chartContainer.clientHeight);
+        });
+    </script>
+</body>
+</html>
