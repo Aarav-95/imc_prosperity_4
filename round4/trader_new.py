@@ -654,21 +654,18 @@ class Trader:
 
     def _trade_vfe_predator(self, state: TradingState, trader_data: dict, result: dict):
         """
-        VFE z-score mean-reversion with Mark 67 hold bias.
+        VFE z-score mean-reversion.
 
         Data-validated findings:
         - Z-score alone: +9K PnL (proven baseline)
         - Always-on passive quotes: LOSE money (Mark 55 adverse selection, 3254 lots)
-        - M67 cooldown 5000: too long, holds through Day 3's -64 tick drop
-        - Crossing spread on M67: -2.38 ticks, 21% WR (never do this)
-
-        Strategy: pure z-score, M67 only suppresses flattening briefly.
+        
+        Strategy: pure z-score. Mark 49 front-running.
         """
         underlying = "VELVETFRUIT_EXTRACT"
         VWAP_WINDOW = 100
 
         # ── Parameters ──────────────────────────────────────────
-        M67_COOLDOWN = 1000    # Short: only suppress flatten briefly after M67
         BASE_TRADE_SIZE = 50   # Normal z-score trade size
         Z_ENTRY = 1.5          # Enter on z-score extreme
         Z_EXIT = 0.0
@@ -690,20 +687,7 @@ class Trader:
         if best_bid is None or best_ask is None:
             return
 
-        # ── Detect Mark 67 activity ──────────────────────────────
-        m67_detected = False
-        for trade in state.market_trades.get(underlying, []):
-            if hasattr(trade, 'buyer') and trade.buyer == "Mark 67":
-                m67_detected = True
-
-        # Persist detection with cooldown
-        last_m67_ts = trader_data.get("last_m67_ts", -999999)
-        if m67_detected:
-            last_m67_ts = state.timestamp
-        trader_data["last_m67_ts"] = last_m67_ts
-
-        # M67 hold: only suppresses flattening of longs
-        m67_hold = (state.timestamp - last_m67_ts) < M67_COOLDOWN
+        # (Mark 67 activity detection removed)
 
         # ── Update rolling VWAP ──────────────────────────────────
         tick_pv = 0.0
@@ -763,8 +747,8 @@ class Trader:
             orders.append(Order(underlying, best_ask - 1, -qty))
             sell_capacity -= qty
 
-        # ── Flatten — suppress during M67 hold ───────────────────
-        elif current_pos > 0 and z > Z_EXIT and not m67_hold:
+        # ── Flatten ──────────────────────────────────────────────
+        elif current_pos > 0 and z > Z_EXIT:
             qty = min(current_pos, sell_capacity)
             if qty > 0:
                 orders.append(Order(underlying, best_ask - 1, -qty))
