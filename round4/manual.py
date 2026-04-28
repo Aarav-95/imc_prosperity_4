@@ -308,7 +308,7 @@ print("\n" + "=" * 90)
 print("STEP 5: MONTE CARLO VERIFICATION (50,000 trials)")
 print("=" * 90)
 
-pnls = run_mc_portfolio(final_qty, n_trials=50_000)
+pnls = run_mc_portfolio(final_qty, n_trials=100, seed=None)
 
 print(f"\nFinal portfolio statistics:")
 print(f"  Mean PnL:        ${pnls.mean():>12,.0f}")
@@ -331,7 +331,7 @@ unhedged_qty[names.index('50C_2W')]  = 50
 unhedged_qty[names.index('CHOOSER')] = -50
 unhedged_qty[names.index('BIN_P')]   = -50
 
-pnls_unhedged = run_mc_portfolio(unhedged_qty, n_trials=50_000, seed=2027)
+pnls_unhedged = run_mc_portfolio(unhedged_qty, n_trials=100, seed=None)
 print(f"\nFor comparison, un-hedged max-edge portfolio:")
 print(f"  Mean: ${pnls_unhedged.mean():,.0f}  Std: ${pnls_unhedged.std():,.0f}  "
       f"Sharpe: {pnls_unhedged.mean()/pnls_unhedged.std():.3f}")
@@ -348,11 +348,16 @@ print("=" * 90)
 
 proposed_qty = np.zeros(len(names), dtype=int)
 proposed_qty[names.index('50C_3W')]  = +50   # leg of chooser arb
-proposed_qty[names.index('50P_2W')]  = +50   # leg of chooser arb + 2w put
-proposed_qty[names.index('50C_2W')]  = +50   # underpriced 2w call
-proposed_qty[names.index('CHOOSER')] = -50   # sell chooser
-proposed_qty[names.index('BIN_P')]   = -50   # sell overpriced binary put
-proposed_qty[names.index('KO_P')]    = +500  # buy cheap KO put
+proposed_qty[names.index('50P_3W')]  = -50
+proposed_qty[names.index('35P_3W')]  = -50
+proposed_qty[names.index('40P_3W')]  = -50
+proposed_qty[names.index('45P_3W')]  = -50
+proposed_qty[names.index('60C_3W')]  = +50
+proposed_qty[names.index('50P_2W')]  = +50
+proposed_qty[names.index('50C_2W')]  = +50
+proposed_qty[names.index('CHOOSER')] = 0
+proposed_qty[names.index('BIN_P')]   = -50
+proposed_qty[names.index('KO_P')]    = -500
 
 # Analytical E[PnL] and std
 e_prop, s_prop = portfolio_stats(proposed_qty)
@@ -389,7 +394,7 @@ print(f"\nChooser arb net credit per unit: "
 
 # Run full nested MC
 print(f"\nRunning 50,000-trial nested MC...")
-pnls_prop = run_mc_portfolio(proposed_qty, n_trials=50_000, seed=2028)
+pnls_prop = run_mc_portfolio(proposed_qty, n_trials=100, seed=None)
 
 print(f"\nMonte Carlo results (each trial = 100-path mark, as in competition):")
 print(f"  Mean PnL:        ${pnls_prop.mean():>12,.0f}")
