@@ -339,3 +339,88 @@ print(f"  P(PnL < -200k): {(pnls_unhedged < -200_000).mean():.3%}  "
       f"(vs {(pnls < -200_000).mean():.3%} hedged)")
 print(f"  p5: ${np.percentile(pnls_unhedged, 5):,.0f}  "
       f"(vs ${np.percentile(pnls, 5):,.0f} hedged)")
+
+
+# choose any values
+print("\n" + "=" * 90)
+print("STEP 6: PROPOSED PORTFOLIO SIMULATION (50,000 trials × 100 paths each)")
+print("=" * 90)
+
+proposed_qty = np.zeros(len(names), dtype=int)
+proposed_qty[names.index('50C_3W')]  = +50   # leg of chooser arb
+proposed_qty[names.index('50P_2W')]  = +50   # leg of chooser arb + 2w put
+proposed_qty[names.index('50C_2W')]  = +50   # underpriced 2w call
+proposed_qty[names.index('CHOOSER')] = -50   # sell chooser
+proposed_qty[names.index('BIN_P')]   = -50   # sell overpriced binary put
+proposed_qty[names.index('KO_P')]    = +500  # buy cheap KO put
+
+# Analytical E[PnL] and std
+e_prop, s_prop = portfolio_stats(proposed_qty)
+print(f"\nAnalytical (1M-path) estimates:")
+print(f"  E[PnL]:  ${e_prop:,.0f}")
+print(f"  std:     ${s_prop:,.0f}")
+print(f"  Sharpe:  {e_prop/s_prop:.3f}")
+
+print(f"\n{'Leg':<10} {'Action':<6} {'Qty':>5} {'Entry':>7} {'Fair':>7} {'Edge/u':>9} {'$ Contrib':>11}")
+print("-" * 70)
+total_prop = 0
+for i, n in enumerate(names):
+    q = proposed_qty[i]
+    if q == 0:
+        continue
+    bid, ask = quotes[n]
+    if q > 0:
+        action, entry = "BUY",  ask
+        edge = fair[n] - ask
+    else:
+        action, entry = "SELL", bid
+        edge = bid - fair[n]
+    contrib = abs(q) * edge * CONTRACT_SIZE
+    total_prop += contrib
+    print(f"{n:<10} {action:<6} {abs(q):>5d} {entry:>7.3f} "
+          f"{fair[n]:>7.3f} {edge:>+9.4f} {contrib:>+11,.0f}")
+print("-" * 70)
+print(f"{'TOTAL E[PnL] (analytical)':<48} {total_prop:>+15,.0f}")
+
+# Chooser arb net cash flow check
+arb_credit = quotes['CHOOSER'][0] - quotes['50C_3W'][1] - quotes['50P_2W'][1]
+print(f"\nChooser arb net credit per unit: "
+      f"22.20 - 12.05 - 9.75 = {arb_credit:+.2f}")
+
+# Run full nested MC
+print(f"\nRunning 50,000-trial nested MC...")
+pnls_prop = run_mc_portfolio(proposed_qty, n_trials=50_000, seed=2028)
+
+print(f"\nMonte Carlo results (each trial = 100-path mark, as in competition):")
+print(f"  Mean PnL:        ${pnls_prop.mean():>12,.0f}")
+print(f"  Std PnL:         ${pnls_prop.std():>12,.0f}")
+print(f"  Sharpe:           {pnls_prop.mean()/pnls_prop.std():.3f}")
+print(f"  P(PnL > 0):       {(pnls_prop > 0).mean():.3%}")
+print(f"  P(PnL > 50k):     {(pnls_prop > 50_000).mean():.3%}")
+print(f"  P(PnL > 100k):    {(pnls_prop > 100_000).mean():.3%}")
+print(f"  P(PnL > 200k):    {(pnls_prop > 200_000).mean():.3%}")
+print(f"  P(PnL < -100k):   {(pnls_prop < -100_000).mean():.3%}")
+print(f"  P(PnL < -200k):   {(pnls_prop < -200_000).mean():.3%}")
+print(f"  P(PnL < -500k):   {(pnls_prop < -500_000).mean():.3%}")
+print(f"\n  Percentiles:")
+for q in [1, 5, 10, 25, 50, 75, 90, 95, 99]:
+    print(f"    p{q:>2}:  ${np.percentile(pnls_prop, q):>12,.0f}")
+
+# Decompose by leg group
+print(f"\nLeg-group breakdown (analytical edge):")
+# use same convention as portfolio_stats: contribution = qty * (fair - entry) * CS
+# for longs: entry = ask; for shorts: entry = bid
+def leg_edge(name, qty_override=None):
+    q = proposed_qty[names.index(name)] if qty_override is None else qty_override
+    entry = quotes[name][1] if q > 0 else quotes[name][0]
+    return q * (fair[name] - entry) * CONTRACT_SIZE
+
+arb_edge    = leg_edge('50C_3W') + leg_edge('50P_2W') + leg_edge('CHOOSER')
+call2w_edge = leg_edge('50C_2W')
+binary_edge = leg_edge('BIN_P')
+ko_edge     = leg_edge('KO_P')
+print(f"  Chooser arb  (near-zero risk): {arb_edge:>+12,.0f}")
+print(f"  2w call buy  (vanilla edge):   {call2w_edge:>+12,.0f}")
+print(f"  Binary put sell:               {binary_edge:>+12,.0f}")
+print(f"  KO put buy   (lottery):        {ko_edge:>+12,.0f}")
+print(f"  Total:                         {arb_edge+call2w_edge+binary_edge+ko_edge:>+12,.0f}")
