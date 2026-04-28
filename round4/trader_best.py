@@ -265,8 +265,6 @@ class ProductBook:
         return self.current_pos
 
 class Trader:
-
-
     def __init__(self):
 
         self.position_limits = {
@@ -302,11 +300,13 @@ class Trader:
             "VEV_6500": 6500,    # Deep OTM — sell target
         }
 
-        self.DEEP_ITM_CFGS = [
-            {"symbol": "VEV_4000", "mean": 1247.0, "sd": 17.114, "z_thresh": 1.5, "take_size": 10, "limit": 300, "prior": 10**9},
-            {"symbol": "VEV_4500", "mean":  747.0, "sd": 17.105, "z_thresh": 1.5, "take_size": 10, "limit": 300, "prior": 10**9},
+        self.OPTIONS_Z = [
+            {"symbol": "VEV_4000", "mean": 1247.0, "sd": 17.114, "z_thresh": 1.5, "take_size": 10, "limit": 300, "prior": 10000},
+            {"symbol": "VEV_4500", "mean":  747.0, "sd": 17.105, "z_thresh": 1.5, "take_size": 10, "limit": 300, "prior": 10000},
             {"symbol": "VEV_5000", "mean":  252.0, "sd": 16.381, "z_thresh": 1.0, "take_size": 10, "limit": 300, "prior": 10000},
             {"symbol": "VEV_5100", "mean":  163.0, "sd": 15.327, "z_thresh": 1.0, "take_size": 50, "limit": 300, "prior": 10000},
+            {"symbol": "VEV_5300", "mean":   43.0, "sd":  8.976, "z_thresh": 0.5, "take_size": 10, "limit": 300, "prior": 200},
+            {"symbol": "VEV_5400", "mean":   14.0, "sd":  4.608, "z_thresh": 0.5, "take_size": 25, "limit": 300, "prior": 500},
         ]
 
     def run(self, state: TradingState):
@@ -533,7 +533,7 @@ class Trader:
         # too shallow for intrinsic-only pricing (_trade_deep_itm_mm).
         SCALP_STRIKES = {}
         for voucher, K in self.VOUCHER_STRIKES.items():
-            if voucher in ["VEV_4000", "VEV_4500", "VEV_5000"]:
+            if voucher in [cfg["symbol"] for cfg in self.OPTIONS_Z]:
                 continue
             intrinsic_k = max(0, S - K)
             if (voucher in strike_data
@@ -631,19 +631,26 @@ class Trader:
 
     def _trade_z_take(self, state: TradingState, trader_data: dict, result: dict):
         zt = trader_data.setdefault("_ema", {})
-        
+
         S = None
         od_u = state.order_depths.get("VELVETFRUIT_EXTRACT")
         if od_u and od_u.buy_orders and od_u.sell_orders:
             S = (max(od_u.buy_orders) + min(od_u.sell_orders)) / 2.0
-            
-        for cfg in self.DEEP_ITM_CFGS:
+
+        ema_S = zt.get("VELVETFRUIT_EXTRACT", S if S else 5247.0)
+        if S is not None:
+            ema_S = 0.9 * ema_S + 0.1 * S
+            zt["VELVETFRUIT_EXTRACT"] = ema_S
+
+        vfe_deviation = (S - ema_S) if S is not None else 0.0
+
+        for cfg in self.OPTIONS_Z:
             sym = cfg["symbol"]
-            
+
             # 5100 only acts like a deep ITM option when S > 5175
             if sym == "VEV_5100" and S is not None and S < 5175:
                 continue
-                
+
             depth = state.order_depths.get(sym)
             if not depth or not depth.buy_orders or not depth.sell_orders:
                 continue
@@ -661,6 +668,18 @@ class Trader:
             z = (mid - eff_mean) / sd if sd > 0 else 0
             if abs(z) < cfg["z_thresh"]:
                 continue
+
+            # Guardrails for high-risk OTM options
+            if sym in ["VEV_5300", "VEV_5400"]:
+                # 1. Do not catch falling knives if underlying VFE is also dumping
+                if z < 0 and vfe_deviation < -0.5:
+                    continue
+                # 2. Do not short a zooming option if underlying VFE is ripping
+                if z > 0 and vfe_deviation > 0.5:
+                    continue
+                # 3. Theta Trap: do not buy deeply depreciated options near expiry value
+                if z < 0 and mid <= 3.0:
+                    continue
 
             pos = state.position.get(sym, 0)
             limit = cfg["limit"]
