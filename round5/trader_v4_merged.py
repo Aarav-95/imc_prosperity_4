@@ -116,6 +116,15 @@ class Trader:
             return (best_bid + best_ask) / 2.0
         return (best_bid * ask_vol + best_ask * bid_vol) / total
 
+    def _compute_obi(self, od: OrderDepth) -> float:
+        """Order Book Imbalance: positive = buy pressure, negative = sell pressure"""
+        bid_vol = sum(od.buy_orders.values())
+        ask_vol = sum(abs(qty) for qty in od.sell_orders.values())
+        total = bid_vol + ask_vol
+        if total <= 0:
+            return 0.0
+        return (bid_vol - ask_vol) / total
+
     def _compute_pair_targets(
         self, state: TradingState, pair_state: dict, tick: int
     ) -> Dict[str, float]:
@@ -248,12 +257,14 @@ class Trader:
         return orders
 
     def _penny_flatten(self, product: str, od: OrderDepth, pos: int, limit: int) -> List[Order]:
-        """Penny-and-flatten strategy from trader_1m - works better for some products."""
+        """Penny-and-flatten strategy with OBI guardrails."""
         if not od.buy_orders or not od.sell_orders:
             return []
 
         best_bid = max(od.buy_orders.keys())
         best_ask = min(od.sell_orders.keys())
+        
+        obi = self._compute_obi(od)
 
         inner_bid = best_bid + 1
         inner_ask = best_ask - 1
@@ -290,15 +301,14 @@ class Trader:
             orders.append(Order(product, fair_int, -pos))
             pos = 0
 
-        # MAKE: balanced quotes at penny-improved prices
+        # MAKE: balanced quotes with OBI guardrails
         buy_cap = limit - pos
         sell_cap = limit + pos
-        skip_bid = pos > 0 and inner_bid >= best_bid
-        skip_ask = pos < 0 and inner_ask <= best_ask
 
-        if buy_cap > 0 and not skip_bid:
+        # Skip buying on extreme sell pressure, skip selling on extreme buy pressure
+        if buy_cap > 0 and obi > -0.80:
             orders.append(Order(product, inner_bid, buy_cap))
-        if sell_cap > 0 and not skip_ask:
+        if sell_cap > 0 and obi < 0.80:
             orders.append(Order(product, inner_ask, -sell_cap))
 
         return orders
