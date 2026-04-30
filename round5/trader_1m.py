@@ -328,6 +328,13 @@ class Trader:
 
             best_bid = max(od.buy_orders.keys())
             best_ask = min(od.sell_orders.keys())
+            book_spread = best_ask - best_bid
+
+            # Toxicity Check 1: Order Book Imbalance (OBI)
+            bid_vol = sum(od.buy_orders.values())
+            ask_vol = sum(abs(qty) for qty in od.sell_orders.values())
+            total_vol = bid_vol + ask_vol
+            obi = (bid_vol - ask_vol) / total_vol if total_vol > 0 else 0
 
             inner_bid = best_bid + 1
             inner_ask = best_ask - 1
@@ -338,12 +345,26 @@ class Trader:
             limit = self.position_limits.get(product, 10)
 
             orders: List[Order] = []
+
+            # Phase 1: Take mispriced liquidity
             take_orders, pos = self._take(od, fair, edge, product, pos, limit)
             orders.extend(take_orders)
+
+            # Phase 2: Clear any accumulated inventory instantly at fair value
             clear_orders, pos = self._clear(fair, product, pos, limit)
             orders.extend(clear_orders)
+
+            # Phase 3: Make balanced quotes (Speculative Spread Capture)
             make_orders = self._make_balanced(inner_bid, inner_ask, product, pos, limit, best_bid, best_ask)
-            orders.extend(make_orders)
+
+            for order in make_orders:
+                # GUARDRAIL: If we are already long (pos > 0) AND there is extreme sell pressure, do not buy more.
+                if order.quantity > 0 and pos > 0 and obi < -0.80:
+                    continue
+                # GUARDRAIL: If we are already short (pos < 0) AND there is extreme buy pressure, do not sell more.
+                if order.quantity < 0 and pos < 0 and obi > 0.80:
+                    continue
+                orders.append(order)
 
             if orders: result[product] = orders
 
