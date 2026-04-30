@@ -1,8 +1,7 @@
 import json
 import math
-from typing import Any
+from typing import Any, List
 from datamodel import OrderDepth, TradingState, Order, Symbol, Listing, Trade, Observation, ProsperityEncoder
-from typing import List
 
 class Logger:
     def __init__(self) -> None:
@@ -25,7 +24,6 @@ class Logger:
             )
         )
 
-        # We truncate state.traderData, trader_data, and self.logs to the same max. length to fit the log limit
         max_item_length = (self.max_log_length - base_length) // 3
 
         print(
@@ -58,14 +56,12 @@ class Logger:
         compressed = []
         for listing in listings.values():
             compressed.append([listing.symbol, listing.product, listing.denomination])
-
         return compressed
 
     def compress_order_depths(self, order_depths: dict[Symbol, OrderDepth]) -> dict[Symbol, list[Any]]:
         compressed = {}
         for symbol, order_depth in order_depths.items():
             compressed[symbol] = [order_depth.buy_orders, order_depth.sell_orders]
-
         return compressed
 
     def compress_trades(self, trades: dict[Symbol, list[Trade]]) -> list[list[Any]]:
@@ -82,7 +78,6 @@ class Logger:
                         trade.timestamp,
                     ]
                 )
-
         return compressed
 
     def compress_observations(self, observations: Observation) -> list[Any]:
@@ -97,7 +92,6 @@ class Logger:
                 observation.sugarPrice,
                 observation.sunlightIndex,
             ]
-
         return [observations.plainValueObservations, conversion_observations]
 
     def compress_orders(self, orders: dict[Symbol, list[Order]]) -> list[list[Any]]:
@@ -105,7 +99,6 @@ class Logger:
         for arr in orders.values():
             for order in arr:
                 compressed.append([order.symbol, order.price, order.quantity])
-
         return compressed
 
     def to_json(self, value: Any) -> str:
@@ -114,22 +107,17 @@ class Logger:
     def truncate(self, value: str, max_length: int) -> str:
         lo, hi = 0, min(len(value), max_length)
         out = ""
-
         while lo <= hi:
             mid = (lo + hi) // 2
-
             candidate = value[:mid]
             if len(candidate) < len(value):
                 candidate += "..."
-
             encoded_candidate = json.dumps(candidate)
-
             if len(encoded_candidate) <= max_length:
                 out = candidate
                 lo = mid + 1
             else:
                 hi = mid - 1
-
         return out
 
 
@@ -141,7 +129,6 @@ logger = Logger()
 # ══════════════════════════════════════════════════════════════════
 
 def norm_cdf(x: float) -> float:
-    """Standard normal CDF (Abramowitz & Stegun approximation)."""
     a1, a2, a3, a4, a5 = 0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429
     p = 0.3275911
     sign = 1 if x >= 0 else -1
@@ -152,7 +139,6 @@ def norm_cdf(x: float) -> float:
 
 
 def bs_call_price(S: float, K: float, T: float, sigma: float, r: float = 0.0) -> float:
-    """Black-Scholes European call price."""
     if T <= 0 or sigma <= 0:
         return max(0, S - K)
     d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
@@ -161,7 +147,6 @@ def bs_call_price(S: float, K: float, T: float, sigma: float, r: float = 0.0) ->
 
 
 def bs_delta(S: float, K: float, T: float, sigma: float, r: float = 0.0) -> float:
-    """Black-Scholes delta for a European call."""
     if T <= 0 or sigma <= 0:
         return 1.0 if S > K else 0.0
     d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
@@ -169,7 +154,6 @@ def bs_delta(S: float, K: float, T: float, sigma: float, r: float = 0.0) -> floa
 
 
 def bs_vega(S: float, K: float, T: float, sigma: float, r: float = 0.0) -> float:
-    """Black-Scholes vega (dC/dσ)."""
     if T <= 0 or sigma <= 0:
         return 0.0
     d1 = (math.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
@@ -177,14 +161,12 @@ def bs_vega(S: float, K: float, T: float, sigma: float, r: float = 0.0) -> float
 
 
 def implied_vol(C_market: float, S: float, K: float, T: float, r: float = 0.0) -> float:
-    """Solve for implied volatility via Newton-Raphson + bisection fallback."""
     intrinsic = max(0, S - K * math.exp(-r * T))
     if C_market < intrinsic - 0.5:
         return 0.01
     if C_market >= S:
         return 5.0
 
-    # Initial guess
     sigma = max(0.01, min(math.sqrt(2 * math.pi / max(T, 0.001)) * C_market / S, 5.0))
 
     for _ in range(50):
@@ -197,7 +179,6 @@ def implied_vol(C_market: float, S: float, K: float, T: float, r: float = 0.0) -
         if abs(price - C_market) < 0.01:
             return sigma
 
-    # Bisection fallback
     lo, hi = 0.001, 10.0
     for _ in range(100):
         mid = (lo + hi) / 2
@@ -214,88 +195,39 @@ class Trader:
 
     def __init__(self):
         self.position_limits = {
-            "GALAXY_SOUNDS_BLACK_HOLES": 10,
-            "GALAXY_SOUNDS_DARK_MATTER": 10,
-            "GALAXY_SOUNDS_PLANETARY_RINGS": 10,
-            "GALAXY_SOUNDS_SOLAR_FLAMES": 10,
-            "GALAXY_SOUNDS_SOLAR_WINDS": 10,
-            "MICROCHIP_CIRCLE": 10,
-            "MICROCHIP_OVAL": 10,
-            "MICROCHIP_RECTANGLE": 10,
-            "MICROCHIP_SQUARE": 10,
-            "MICROCHIP_TRIANGLE": 10,
-            "OXYGEN_SHAKE_CHOCOLATE": 10,
-            "OXYGEN_SHAKE_EVENING_BREATH": 10,
-            "OXYGEN_SHAKE_GARLIC": 10,
-            "OXYGEN_SHAKE_MINT": 10,
-            "OXYGEN_SHAKE_MORNING_BREATH": 10,
-            "PANEL_1X2": 10,
-            "PANEL_1X4": 10,
-            "PANEL_2X2": 10,
-            "PANEL_2X4": 10,
-            "PANEL_4X4": 10,
-            "PEBBLES_L": 10,
-            "PEBBLES_M": 10,
-            "PEBBLES_S": 10,
-            "PEBBLES_XL": 10,
-            "PEBBLES_XS": 10,
-            "ROBOT_DISHES": 10,
-            "ROBOT_IRONING": 10,
-            "ROBOT_LAUNDRY": 10,
-            "ROBOT_MOPPING": 10,
-            "ROBOT_VACUUMING": 10,
-            "SLEEP_POD_COTTON": 10,
-            "SLEEP_POD_LAMB_WOOL": 10,
-            "SLEEP_POD_NYLON": 10,
-            "SLEEP_POD_POLYESTER": 10,
-            "SLEEP_POD_SUEDE": 10,
-            "SNACKPACK_CHOCOLATE": 10,
-            "SNACKPACK_PISTACHIO": 10,
-            "SNACKPACK_RASPBERRY": 10,
-            "SNACKPACK_STRAWBERRY": 10,
-            "SNACKPACK_VANILLA": 10,
-            "TRANSLATOR_ASTRO_BLACK": 10,
-            "TRANSLATOR_ECLIPSE_CHARCOAL": 10,
-            "TRANSLATOR_GRAPHITE_MIST": 10,
-            "TRANSLATOR_SPACE_GRAY": 10,
-            "TRANSLATOR_VOID_BLUE": 10,
-            "UV_VISOR_AMBER": 10,
-            "UV_VISOR_MAGENTA": 10,
-            "UV_VISOR_ORANGE": 10,
-            "UV_VISOR_RED": 10,
-            "UV_VISOR_YELLOW": 10,
+            "GALAXY_SOUNDS_BLACK_HOLES": 10, "GALAXY_SOUNDS_DARK_MATTER": 10,
+            "GALAXY_SOUNDS_PLANETARY_RINGS": 10, "GALAXY_SOUNDS_SOLAR_FLAMES": 10,
+            "GALAXY_SOUNDS_SOLAR_WINDS": 10, "MICROCHIP_CIRCLE": 10,
+            "MICROCHIP_OVAL": 10, "MICROCHIP_RECTANGLE": 10,
+            "MICROCHIP_SQUARE": 10, "MICROCHIP_TRIANGLE": 10,
+            "OXYGEN_SHAKE_CHOCOLATE": 10, "OXYGEN_SHAKE_EVENING_BREATH": 10,
+            "OXYGEN_SHAKE_GARLIC": 10, "OXYGEN_SHAKE_MINT": 10,
+            "OXYGEN_SHAKE_MORNING_BREATH": 10, "PANEL_1X2": 10,
+            "PANEL_1X4": 10, "PANEL_2X2": 10, "PANEL_2X4": 10,
+            "PANEL_4X4": 10, "PEBBLES_L": 10, "PEBBLES_M": 10,
+            "PEBBLES_S": 10, "PEBBLES_XL": 10, "PEBBLES_XS": 10,
+            "ROBOT_DISHES": 10, "ROBOT_IRONING": 10, "ROBOT_LAUNDRY": 10,
+            "ROBOT_MOPPING": 10, "ROBOT_VACUUMING": 10, "SLEEP_POD_COTTON": 10,
+            "SLEEP_POD_LAMB_WOOL": 10, "SLEEP_POD_NYLON": 10,
+            "SLEEP_POD_POLYESTER": 10, "SLEEP_POD_SUEDE": 10,
+            "SNACKPACK_CHOCOLATE": 10, "SNACKPACK_PISTACHIO": 10,
+            "SNACKPACK_RASPBERRY": 10, "SNACKPACK_STRAWBERRY": 10,
+            "SNACKPACK_VANILLA": 10, "TRANSLATOR_ASTRO_BLACK": 10,
+            "TRANSLATOR_ECLIPSE_CHARCOAL": 10, "TRANSLATOR_GRAPHITE_MIST": 10,
+            "TRANSLATOR_SPACE_GRAY": 10, "TRANSLATOR_VOID_BLUE": 10,
+            "UV_VISOR_AMBER": 10, "UV_VISOR_MAGENTA": 10,
+            "UV_VISOR_ORANGE": 10, "UV_VISOR_RED": 10, "UV_VISOR_YELLOW": 10,
         }
 
-        # ── Products to SKIP ───────────────────────────────────────
-        # These products consistently lose with penny-and-flatten:
-        # either wide spreads make crossing too expensive, structural
-        # drift overwhelms the spread capture, or low MR signal means
-        # we just accumulate inventory into adverse moves.
+        # ── Toxic Assets for the Adverse Quoter ────────────────────
         self.SKIP = {
-            # Consistent --- losers (negative all 3 days)
-            "MICROCHIP_SQUARE",             # -83K, wide spread + high vol
-            "PEBBLES_M",                    # -59K, wide spread
-            "PEBBLES_XS",                   # -52K, wide spread
-            "ROBOT_VACUUMING",              # -35K, consistent bleeder
-            "SLEEP_POD_COTTON",             # -87K, biggest loser
-            "SLEEP_POD_SUEDE",              # -26K, consistent bleeder
-            "TRANSLATOR_ECLIPSE_CHARCOAL",  # -15K, consistent bleeder
-            "UV_VISOR_MAGENTA",             # -55K, wide spread
-            "UV_VISOR_YELLOW",              # -152K, catastrophic
-            # Large net losers (negative 2/3 days)
-            "GALAXY_SOUNDS_DARK_MATTER",    # -33K
-            "GALAXY_SOUNDS_SOLAR_FLAMES",   # -11K
-            "PANEL_4X4",                    # -79K
-            "ROBOT_MOPPING",                # -23K
-            "SLEEP_POD_POLYESTER",          # -49K
-            "SNACKPACK_STRAWBERRY",         # -21K
-            "TRANSLATOR_GRAPHITE_MIST",     # -39K
-            "TRANSLATOR_SPACE_GRAY",        # -30K
-            # Borderline net losers (negative 2/3 days, small total)
-            "PANEL_2X2",                    # -8K
-            "ROBOT_DISHES",                 # -5K
-            "ROBOT_LAUNDRY",                # -4K
-            "UV_VISOR_ORANGE",              # -5K
+            "MICROCHIP_SQUARE", "PEBBLES_M", "PEBBLES_XS", "ROBOT_VACUUMING",
+            "SLEEP_POD_COTTON", "SLEEP_POD_SUEDE", "TRANSLATOR_ECLIPSE_CHARCOAL",
+            "UV_VISOR_MAGENTA", "UV_VISOR_YELLOW", "GALAXY_SOUNDS_DARK_MATTER",
+            "GALAXY_SOUNDS_SOLAR_FLAMES", "PANEL_4X4", "ROBOT_MOPPING",
+            "SLEEP_POD_POLYESTER", "SNACKPACK_STRAWBERRY", "TRANSLATOR_GRAPHITE_MIST",
+            "TRANSLATOR_SPACE_GRAY", "PANEL_2X2", "ROBOT_DISHES", "ROBOT_LAUNDRY",
+            "UV_VISOR_ORANGE"
         }
 
         self.ALL_PRODUCTS = [p for p in self.position_limits if p not in self.SKIP]
@@ -305,57 +237,24 @@ class Trader:
     # ══════════════════════════════════════════════════════════════
 
     def _get_mid(self, order_depth: OrderDepth) -> float:
-        """Get mid-price from a two-sided order book. Returns None if one-sided."""
         best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else None
         best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else None
         if best_bid is not None and best_ask is not None:
             return (best_bid + best_ask) / 2
         return None
 
-    # ══════════════════════════════════════════════════════════════
-    # CORE: TAKE → CLEAR → MAKE  (penny-and-flatten)
-    #
-    # Phase 1 — TAKE: sweep any book level priced better than our
-    #   inner quote (best_bid+1 / best_ask-1). This captures any
-    #   NPC mispricing that exceeds the penny improvement.
-    #
-    # Phase 2 — CLEAR: post the remaining inventory at fair value
-    #   (the mid-price). This immediately flattens any position
-    #   acquired during TAKE, limiting directional exposure.
-    #
-    # Phase 3 — MAKE: post balanced passive quotes at the penny-
-    #   improved prices (bid+1 / ask-1). Skip the side that would
-    #   worsen an existing position to avoid accumulating risk.
-    #
-    # The edge comes from the penny improvement: we buy 1 tick
-    # above best_bid and sell 1 tick below best_ask, capturing
-    # ~(spread - 2) ticks per round trip. The CLEAR step ensures
-    # we never hold directional risk for more than one tick.
-    # ══════════════════════════════════════════════════════════════
-
-    def _take(self, od: OrderDepth, fair: float, edge: float,
-              product: str, pos: int, limit: int) -> tuple:
-        """
-        Phase 1: sweep mispriced book levels.
-        Buy anything priced below (fair - edge), sell above (fair + edge).
-        Returns (orders, updated_pos).
-        """
+    def _take(self, od: OrderDepth, fair: float, edge: float, product: str, pos: int, limit: int) -> tuple:
         orders: List[Order] = []
-
-        # Buy underpriced asks
         for ask_price in sorted(od.sell_orders.keys()):
-            if ask_price >= fair - edge:
-                break
+            if ask_price >= fair - edge: break
             avail = -od.sell_orders[ask_price]
             qty = min(avail, limit - pos)
             if qty > 0:
                 orders.append(Order(product, ask_price, qty))
                 pos += qty
 
-        # Sell overpriced bids
         for bid_price in sorted(od.buy_orders.keys(), reverse=True):
-            if bid_price <= fair + edge:
-                break
+            if bid_price <= fair + edge: break
             avail = od.buy_orders[bid_price]
             qty = min(avail, limit + pos)
             if qty > 0:
@@ -365,45 +264,25 @@ class Trader:
         return orders, pos
 
     def _clear(self, fair: float, product: str, pos: int, limit: int) -> tuple:
-        """
-        Phase 2: flatten inventory at fair value.
-        If long, sell at fair. If short, buy at fair.
-        Returns (orders, updated_pos).
-        """
         orders: List[Order] = []
         fair_int = int(round(fair))
-
         if pos > 0:
             orders.append(Order(product, fair_int, -pos))
             pos = 0
         elif pos < 0:
             orders.append(Order(product, fair_int, -pos))
             pos = 0
-
         return orders, pos
 
-    def _make_balanced(self, bid_price: int, ask_price: int,
-                       product: str, pos: int, limit: int,
-                       best_bid: int, best_ask: int) -> List[Order]:
-        """
-        Phase 3: post passive quotes inside the spread.
-        Skip the side that would worsen an existing position
-        (don't bid when long if our bid >= best_bid, etc.)
-        Returns orders.
-        """
+    def _make_balanced(self, bid_price: int, ask_price: int, product: str, pos: int, limit: int, best_bid: int, best_ask: int) -> List[Order]:
         orders: List[Order] = []
         buy_cap = limit - pos
         sell_cap = limit + pos
-
-        # When long, don't bid if our bid would join/improve the NPC best
-        # bid — that just adds to our long exposure at a bad price.
         skip_bid = pos > 0 and bid_price >= best_bid
         skip_ask = pos < 0 and ask_price <= best_ask
 
-        if buy_cap > 0 and not skip_bid:
-            orders.append(Order(product, bid_price, buy_cap))
-        if sell_cap > 0 and not skip_ask:
-            orders.append(Order(product, ask_price, -sell_cap))
+        if buy_cap > 0 and not skip_bid: orders.append(Order(product, bid_price, buy_cap))
+        if sell_cap > 0 and not skip_ask: orders.append(Order(product, ask_price, -sell_cap))
 
         return orders
 
@@ -415,42 +294,43 @@ class Trader:
         result = {}
         conversions = 0
 
-        # deserialize persistent state
         trader_data = {}
         if state.traderData:
-            try:
-                trader_data = json.loads(state.traderData)
-            except:
-                pass
+            try: trader_data = json.loads(state.traderData)
+            except: pass
 
-        # track day via timestamp wrap
         last_ts = trader_data.get("last_ts", -1)
         if state.timestamp < last_ts:
             trader_data["day"] = trader_data.get("day", 0) + 1
         trader_data["last_ts"] = state.timestamp
 
-        # ── Penny-and-flatten on every product ────────────────────
+        ewma_state = trader_data.setdefault("ewma", {})
+
+        # ── Phase 1: Penny-and-flatten on SAFE products ───────────
         self.penny_flatten(state, result)
-        
-        # serialize persistent state
+
+        # ── Phase 2: v4 MM logic on TOXIC (SKIP) products ─────────
+        self.v4_maker(state, result, ewma_state)
+
+        # Serialize persistent state
         traderData = json.dumps(trader_data)
         logger.flush(state, result, conversions, traderData)
         return result, conversions, traderData
 
-    def penny_flatten(self, state: TradingState, result):
+    # ══════════════════════════════════════════════════════════════
+    # STRATEGY 1: PENNY FLATTEN (Safe Assets)
+    # ══════════════════════════════════════════════════════════════
+
+    def penny_flatten(self, state: TradingState, result: dict):
         for product in self.ALL_PRODUCTS:
             od = state.order_depths.get(product)
-            if not od or not od.buy_orders or not od.sell_orders:
-                continue
+            if not od or not od.buy_orders or not od.sell_orders: continue
 
             best_bid = max(od.buy_orders.keys())
             best_ask = min(od.sell_orders.keys())
 
-            # Penny-improved inner quotes
             inner_bid = best_bid + 1
             inner_ask = best_ask - 1
-
-            # Fair value = midpoint of our inner quotes
             fair = (inner_bid + inner_ask) / 2.0
             edge = (inner_ask - inner_bid) / 2.0
 
@@ -458,20 +338,103 @@ class Trader:
             limit = self.position_limits.get(product, 10)
 
             orders: List[Order] = []
-
-            # Phase 1: take mispriced levels
             take_orders, pos = self._take(od, fair, edge, product, pos, limit)
             orders.extend(take_orders)
-
-            # Phase 2: clear inventory at fair
             clear_orders, pos = self._clear(fair, product, pos, limit)
             orders.extend(clear_orders)
-
-            # Phase 3: make balanced quotes at penny-improved prices
-            make_orders = self._make_balanced(
-                inner_bid, inner_ask, product, pos, limit, best_bid, best_ask
-            )
+            make_orders = self._make_balanced(inner_bid, inner_ask, product, pos, limit, best_bid, best_ask)
             orders.extend(make_orders)
+
+            if orders: result[product] = orders
+
+    def v4_maker(self, state: TradingState, result: dict, ewma_state: dict):
+        EWMA_ALPHA = 0.93
+        MR_MIN_VAR = 4.0
+        MR_K = 1.5
+        MR_CAP = 4
+        INV_SKEW = 0.5
+
+        for product in self.SKIP:
+            od = state.order_depths.get(product)
+            if not od or not od.buy_orders or not od.sell_orders:
+                continue
+
+            best_bid   = max(od.buy_orders.keys())
+            best_ask   = min(od.sell_orders.keys())
+            book_spread = best_ask - best_bid
+            if book_spread <= 0:
+                continue
+
+            # Microprice calculation
+            bid_vol = od.buy_orders[best_bid]
+            ask_vol = abs(od.sell_orders[best_ask])
+            total   = bid_vol + ask_vol
+            if total <= 0:
+                fair = (best_bid + best_ask) / 2.0
+            else:
+                fair = (best_bid * ask_vol + best_ask * bid_vol) / total
+
+            # Update EWMA mean + variance
+            prev = ewma_state.get(product)
+            if prev is None:
+                ewma_m, ewma_v = fair, 0.0
+            else:
+                ewma_m = EWMA_ALPHA * prev["m"] + (1 - EWMA_ALPHA) * fair
+                ewma_v = EWMA_ALPHA * prev["v"] + (1 - EWMA_ALPHA) * (fair - ewma_m) ** 2
+            ewma_state[product] = {"m": ewma_m, "v": ewma_v}
+
+            pos = state.position.get(product, 0)
+            limit = self.position_limits.get(product, 10)
+
+            # Mean-reversion target nudge
+            if ewma_v > MR_MIN_VAR:
+                z      = (fair - ewma_m) / math.sqrt(ewma_v)
+                mr_adj = max(-MR_CAP, min(MR_CAP, -MR_K * z))
+            else:
+                mr_adj = 0.0
+
+            dyn_target = max(-limit, min(limit, mr_adj))
+
+            # Inventory skew anchored at dynamic target
+            deviation   = pos - dyn_target
+            skewed_fair = fair - INV_SKEW * deviation
+
+            # Half-spread logic
+            half = max(1.0, book_spread / 4.0)
+
+            our_bid = math.floor(skewed_fair - half)
+            our_ask = math.ceil(skewed_fair  + half)
+            if our_ask <= our_bid:
+                our_ask = our_bid + 1
+
+            buy_cap  = limit - pos
+            sell_cap = limit + pos
+
+            orders: List[Order] = []
+
+            # 1. Take mispriced liquidity immediately
+            ask_taken = 0
+            if best_ask <= skewed_fair - half and buy_cap > 0:
+                avail      = abs(od.sell_orders[best_ask])
+                ask_taken  = min(avail, buy_cap)
+                if ask_taken > 0:
+                    orders.append(Order(product, best_ask, ask_taken))
+
+            bid_taken = 0
+            if best_bid >= skewed_fair + half and sell_cap > 0:
+                avail      = od.buy_orders[best_bid]
+                bid_taken  = min(avail, sell_cap)
+                if bid_taken > 0:
+                    orders.append(Order(product, best_bid, -bid_taken))
+
+            # 2. Quote residual capacity passively
+            quote_buy  = max(0, buy_cap  - ask_taken)
+            quote_sell = max(0, sell_cap - bid_taken)
+
+            if quote_buy > 0:
+                orders.append(Order(product, int(our_bid), quote_buy))
+            if quote_sell > 0:
+                orders.append(Order(product, int(our_ask), -quote_sell))
 
             if orders:
                 result[product] = orders
