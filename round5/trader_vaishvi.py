@@ -1,274 +1,266 @@
+from __future__ import annotations
 from datamodel import OrderDepth, TradingState, Order
-from typing import List, Dict
-from collections import deque
-import numpy as np
 import json
+import math
 
 LIMIT = 10
 
+# EWMA mean-reversion overlay (~30-tick span)
+EWMA_ALPHA = 0.93
+MR_K       = 1.5
+MR_CAP     = 4
+MR_MIN_VAR = 4.0
+
+# SNACKPACK pair-trade slow EWMA (~500-tick span)
+PAIR_ALPHA    = 0.998
+PAIR_Z_THRESH = 2.0
+PAIR_MAX_LEG  = 5
+PAIR_WARMUP   = 500
+
+# op="+" -> spread = a + b (sum-stationary, anticorrelated pair)
+# op="-" -> spread = a - b (diff-stationary, positively correlated pair)
+SNACKPACK_PAIRS = [
+    ("SNACKPACK_CHOCOLATE", "SNACKPACK_VANILLA",    "+"),
+    ("SNACKPACK_RASPBERRY", "SNACKPACK_STRAWBERRY",  "+"),
+    ("SNACKPACK_PISTACHIO", "SNACKPACK_RASPBERRY",   "+"),
+    ("SNACKPACK_PISTACHIO", "SNACKPACK_STRAWBERRY",  "-"),
+]
+SNACKPACK_PRODUCTS = {
+    "SNACKPACK_CHOCOLATE", "SNACKPACK_VANILLA",
+    "SNACKPACK_RASPBERRY", "SNACKPACK_STRAWBERRY",
+    "SNACKPACK_PISTACHIO",
+}
+
+# PEBBLES basket: microprice sum of all 5 ~= 50000 (implied fair per leg)
 PEBBLES = ["PEBBLES_XS", "PEBBLES_S", "PEBBLES_M", "PEBBLES_L", "PEBBLES_XL"]
 
-# Johansen cointegrating vector (normalized to CHOCOLATE=1)
-SNACK_COINT  = ("SNACKPACK_CHOCOLATE", "SNACKPACK_PISTACHIO", "SNACKPACK_STRAWBERRY")
-COINT_BETA   = (1.0, -2.1259, -0.2320)
-COINT_SCALE  = 4
-COINT_WINDOW = 200
-COINT_ENTER  = 2.0
-COINT_EXIT   = 0.5
-_LONG_TGTS   = tuple(int(round(COINT_SCALE * b)) for b in COINT_BETA)   # (+4, -8, -1)
-_SHORT_TGTS  = tuple(-t for t in _LONG_TGTS)                             # (-4, +8, +1)
+# Per-product config:
+#   target_pos : directional inventory bias (0 = pure MM, ±5 = lean into drift)
+#                SNACKPACK products: overridden by pair-trade logic
+#   inv_skew   : fair shift per (position - target) / LIMIT seashells
+#   size       : lots per quote side
+#   min_half   : minimum half-spread to post
+CFG: dict[str, dict] = {
+    # Tight-spread products — higher size, lower skew
+    "TRANSLATOR_ECLIPSE_CHARCOAL":   {"target_pos": +5, "inv_skew":  4, "size": 6, "min_half": 2},
+    "TRANSLATOR_ASTRO_BLACK":        {"target_pos": +5, "inv_skew":  4, "size": 6, "min_half": 2},
+    "ROBOT_LAUNDRY":                 {"target_pos": -5, "inv_skew":  4, "size": 6, "min_half": 2},
+    "SNACKPACK_PISTACHIO":           {"target_pos":  0, "inv_skew":  6, "size": 6, "min_half": 4},
+    "SNACKPACK_RASPBERRY":           {"target_pos":  0, "inv_skew":  6, "size": 6, "min_half": 4},
+    "SNACKPACK_STRAWBERRY":          {"target_pos":  0, "inv_skew":  6, "size": 6, "min_half": 4},
 
-# Hold max position in products with consistent directional drift all 3 days
-DIRECTIONAL_HOLDS = {
-    "MICROCHIP_OVAL":            -10,  # -52.7% total, all 3 days ↓, accelerating
-    "UV_VISOR_AMBER":            -10,  # -31.5% total, all 3 days ↓
-    "PANEL_2X4":                 +10,  # +22.1% total, all 3 days ↑ (flattest drift)
-    "OXYGEN_SHAKE_GARLIC":       +10,  # +35.6% total, all 3 days ↑
-    "UV_VISOR_RED":              +10,  # +16.4% total, all 3 days ↑
-    "GALAXY_SOUNDS_BLACK_HOLES": +10,  # +31.4% total, all 3 days ↑
+    # Directional bias tier — target ±5, keep at half-limit so both sides quote
+    "PANEL_1X2":                     {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 2},
+    "UV_VISOR_AMBER":                {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 2},
+    "PEBBLES_M":                     {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "SLEEP_POD_SUEDE":               {"target_pos": +5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "MICROCHIP_RECTANGLE":           {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "GALAXY_SOUNDS_SOLAR_FLAMES":    {"target_pos": +5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "TRANSLATOR_GRAPHITE_MIST":      {"target_pos": +5, "inv_skew": 15, "size": 4, "min_half": 2},
+    "PANEL_4X4":                     {"target_pos": +5, "inv_skew": 15, "size": 4, "min_half": 2},
+    "PEBBLES_XL":                    {"target_pos": +5, "inv_skew": 15, "size": 4, "min_half": 4},
+    "GALAXY_SOUNDS_DARK_MATTER":     {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "PANEL_2X2":                     {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 2},
+    "ROBOT_IRONING":                 {"target_pos": +5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "ROBOT_VACUUMING":               {"target_pos": +5, "inv_skew": 15, "size": 4, "min_half": 2},
+    "UV_VISOR_RED":                  {"target_pos": +5, "inv_skew": 15, "size": 4, "min_half": 2},
+    "UV_VISOR_ORANGE":               {"target_pos": +5, "inv_skew": 15, "size": 4, "min_half": 2},
+    "UV_VISOR_YELLOW":               {"target_pos": -3, "inv_skew": 12, "size": 3, "min_half": 2},
+    "GALAXY_SOUNDS_PLANETARY_RINGS": {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "PANEL_1X4":                     {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 2},
+
+    # Previously skipped products — now with drift-matched target_pos
+    "SLEEP_POD_COTTON":              {"target_pos": +5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "PEBBLES_S":                     {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "MICROCHIP_OVAL":                {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "UV_VISOR_MAGENTA":              {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "PANEL_2X4":                     {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "ROBOT_MOPPING":                 {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "MICROCHIP_TRIANGLE":            {"target_pos": +5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "TRANSLATOR_SPACE_GRAY":         {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "SLEEP_POD_LAMB_WOOL":           {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "MICROCHIP_SQUARE":              {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "OXYGEN_SHAKE_GARLIC":           {"target_pos": +5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "OXYGEN_SHAKE_MINT":             {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "OXYGEN_SHAKE_MORNING_BREATH":   {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "PEBBLES_XS":                    {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "TRANSLATOR_VOID_BLUE":          {"target_pos": +5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "SLEEP_POD_NYLON":               {"target_pos": +5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "MICROCHIP_CIRCLE":              {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "SNACKPACK_CHOCOLATE":           {"target_pos": +5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "SNACKPACK_VANILLA":             {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "OXYGEN_SHAKE_EVENING_BREATH":   {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "SLEEP_POD_POLYESTER":           {"target_pos": +5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "GALAXY_SOUNDS_BLACK_HOLES":     {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "PEBBLES_L":                     {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
+    "GALAXY_SOUNDS_SOLAR_WINDS":     {"target_pos": -5, "inv_skew": 15, "size": 4, "min_half": 3},
 }
 
-# Products that consistently lose on penny-flatten — skip entirely
-SKIP = {
-    "MICROCHIP_SQUARE",            # -83K
-    "PEBBLES_M",                   # -59K  (wide spread — basket arb still runs)
-    "PEBBLES_XS",                  # -52K
-    "ROBOT_VACUUMING",             # -35K
-    "SLEEP_POD_COTTON",            # -87K
-    "SLEEP_POD_SUEDE",             # -26K
-    "TRANSLATOR_ECLIPSE_CHARCOAL", # -15K
-    "UV_VISOR_MAGENTA",            # -55K
-    "UV_VISOR_YELLOW",             # -152K
-    "GALAXY_SOUNDS_DARK_MATTER",   # -33K
-    "GALAXY_SOUNDS_SOLAR_FLAMES",  # -11K
-    "PANEL_4X4",                   # -79K
-    "ROBOT_MOPPING",               # -23K
-    "SLEEP_POD_POLYESTER",         # -49K
-    "SNACKPACK_STRAWBERRY",        # -21K
-    "TRANSLATOR_GRAPHITE_MIST",    # -39K
-    "TRANSLATOR_SPACE_GRAY",       # -30K
-    "PANEL_2X2",                   # -8K
-    "ROBOT_DISHES",                # -5K
-    "ROBOT_LAUNDRY",               # -4K
-    "UV_VISOR_ORANGE",             # -5K
-}
 
-# Products handled by dedicated strategies — excluded from penny-flatten
-_SPECIAL = set(PEBBLES) | set(DIRECTIONAL_HOLDS) | set(SNACK_COINT) | SKIP
-
-
-def best(od: OrderDepth):
-    bb = max(od.buy_orders)  if od.buy_orders  else None
-    ba = min(od.sell_orders) if od.sell_orders else None
-    bbv = od.buy_orders[bb]   if bb is not None else 0
-    bav = -od.sell_orders[ba] if ba is not None else 0
-    return bb, bbv, ba, bav
-
-
-def mid(od: OrderDepth):
-    bb, _, ba, _ = best(od)
-    if bb is None or ba is None:
+def microprice(od: OrderDepth) -> float | None:
+    if not od.buy_orders or not od.sell_orders:
         return None
-    return (bb + ba) / 2
-
-
-def passive_quote(result, prod, od, lpos, fair_val, size):
-    bb, _, ba, _ = best(od)
-    if bb is None or ba is None:
-        return
-    want_buy  = int(np.floor(fair_val)) - 1
-    want_sell = int(np.ceil(fair_val))  + 1
-    if bb < want_buy < ba and lpos < LIMIT:
-        result[prod].append(Order(prod, want_buy,  min(size, LIMIT - lpos)))
-    if bb < want_sell < ba and lpos > -LIMIT:
-        result[prod].append(Order(prod, want_sell, -min(size, LIMIT + lpos)))
-
-
-def penny_take(od, fair, edge, prod, pos):
-    """Phase 1: sweep book levels priced better than our inner quote."""
-    orders = []
-    for ask_px in sorted(od.sell_orders.keys()):
-        if ask_px >= fair - edge:
-            break
-        avail = -od.sell_orders[ask_px]
-        qty = min(avail, LIMIT - pos)
-        if qty > 0:
-            orders.append(Order(prod, ask_px, qty))
-            pos += qty
-    for bid_px in sorted(od.buy_orders.keys(), reverse=True):
-        if bid_px <= fair + edge:
-            break
-        avail = od.buy_orders[bid_px]
-        qty = min(avail, LIMIT + pos)
-        if qty > 0:
-            orders.append(Order(prod, bid_px, -qty))
-            pos -= qty
-    return orders, pos
-
-
-def penny_clear(fair, prod, pos):
-    """Phase 2: flatten inventory at fair value."""
-    if pos == 0:
-        return [], pos
-    return [Order(prod, int(round(fair)), -pos)], 0
-
-
-def penny_make(inner_bid, inner_ask, prod, pos, best_bid, best_ask):
-    """Phase 3: passive quotes at penny-improved prices, skipping the side
-    that would worsen an existing directional position."""
-    orders = []
-    skip_bid = pos > 0 and inner_bid >= best_bid
-    skip_ask = pos < 0 and inner_ask <= best_ask
-    if LIMIT - pos > 0 and not skip_bid:
-        orders.append(Order(prod, inner_bid,  LIMIT - pos))
-    if LIMIT + pos > 0 and not skip_ask:
-        orders.append(Order(prod, inner_ask, -(LIMIT + pos)))
-    return orders
+    bb = max(od.buy_orders)
+    ba = min(od.sell_orders)
+    bv = od.buy_orders[bb]
+    av = abs(od.sell_orders[ba])
+    total = bv + av
+    if total <= 0:
+        return (bb + ba) / 2.0
+    return (bb * av + ba * bv) / total
 
 
 class Trader:
     def run(self, state: TradingState):
         try:
-            saved = json.loads(state.traderData) if state.traderData else {}
+            ts = json.loads(state.traderData) if state.traderData else {}
         except Exception:
-            saved = {}
+            ts = {}
 
-        spread_hist = deque(saved.get("spread_hist", []), maxlen=COINT_WINDOW)
+        ewma_state: dict[str, dict] = ts.get("ewma", {})
+        pair_state: dict[str, dict] = ts.get("pairs", {})
+        tick = ts.get("tick", 0) + 1
 
-        prev_ts = saved.get("prev_ts", -1)
-        if int(state.timestamp) < int(prev_ts):
-            spread_hist.clear()
-
-        result: Dict[str, List[Order]] = {p: [] for p in state.order_depths}
+        orders: dict[str, list[Order]] = {}
         pos = state.position
 
-        # ── 0) Directional holds: reach target ASAP and hold ─────────────────
-        for prod, tgt in DIRECTIONAL_HOLDS.items():
-            od = state.order_depths.get(prod)
-            if od is None:
-                continue
-            lpos = pos.get(prod, 0)
-            delta = tgt - lpos
-            if delta == 0:
-                continue
-            bb, bbv, ba, bav = best(od)
-            if delta > 0 and ba is not None:
-                qty = min(delta, bav, LIMIT - lpos)
-                if qty > 0:
-                    result[prod].append(Order(prod, ba, qty))
-            elif delta < 0 and bb is not None:
-                qty = min(-delta, bbv, LIMIT + lpos)
-                if qty > 0:
-                    result[prod].append(Order(prod, bb, -qty))
+        # --- SNACKPACK pair-trade signals ---
+        # Slow EWMA tracks spread mean + absolute deviation (sigma proxy).
+        # z > PAIR_Z_THRESH => spread stretched high => fade it back.
+        snack_target: dict[str, float] = {p: 0.0 for p in SNACKPACK_PRODUCTS}
+        pair_active = tick >= PAIR_WARMUP
 
-        # ── 1) PEBBLES: delta-neutral aggressive arb ──────────────────────────
-        peb_mids = {p: mid(state.order_depths[p])
-                    for p in PEBBLES if p in state.order_depths}
-        fair: Dict[str, float] = {}
-        if len(peb_mids) == 5 and all(m is not None for m in peb_mids.values()):
+        for a, b, op in SNACKPACK_PAIRS:
+            label = f"{a}_{b}_{op}"
+            od_a = state.order_depths.get(a)
+            od_b = state.order_depths.get(b)
+            if od_a is None or od_b is None:
+                continue
+            m_a = microprice(od_a)
+            m_b = microprice(od_b)
+            if m_a is None or m_b is None:
+                continue
+            spread = (m_a + m_b) if op == "+" else (m_a - m_b)
+            ps = pair_state.get(label, {"m": spread, "ad": 0.0})
+            new_m  = PAIR_ALPHA * ps["m"]  + (1 - PAIR_ALPHA) * spread
+            new_ad = PAIR_ALPHA * ps["ad"] + (1 - PAIR_ALPHA) * abs(spread - new_m)
+            pair_state[label] = {"m": new_m, "ad": new_ad}
+
+            if not pair_active or new_ad < 5.0:
+                continue
+            z = (spread - new_m) / new_ad
+            if abs(z) < PAIR_Z_THRESH:
+                continue
+            leg  = min(PAIR_MAX_LEG, int(abs(z) - PAIR_Z_THRESH + 1) * 2)
+            sign = -1 if z > 0 else +1   # z high => spread too wide => fade
+            if op == "+":
+                snack_target[a] += sign * leg
+                snack_target[b] += sign * leg
+            else:
+                snack_target[a] += sign * leg
+                snack_target[b] -= sign * leg
+
+        for p in snack_target:
+            snack_target[p] = max(-LIMIT, min(LIMIT, snack_target[p]))
+
+        # --- PEBBLES basket-implied fair values ---
+        peb_micro = {p: microprice(state.order_depths[p])
+                     for p in PEBBLES if p in state.order_depths}
+        peb_fair: dict[str, float] = {}
+        if len(peb_micro) == 5 and all(v is not None for v in peb_micro.values()):
             for leg in PEBBLES:
-                fair[leg] = 50000 - sum(peb_mids[o] for o in PEBBLES if o != leg)
+                peb_fair[leg] = 50000 - sum(peb_micro[o] for o in PEBBLES if o != leg)
 
-            buy_cands, sell_cands = [], []
-            for leg in PEBBLES:
-                od = state.order_depths.get(leg)
-                if od is None:
+        # --- Main MM loop ---
+        for sym, cfg in CFG.items():
+            od = state.order_depths.get(sym)
+            if od is None or not od.buy_orders or not od.sell_orders:
+                continue
+
+            # Basket-implied fair for PEBBLES when all 5 legs are live
+            if sym in peb_fair:
+                fair = peb_fair[sym]
+            else:
+                fair = microprice(od)
+                if fair is None:
                     continue
-                bb, bbv, ba, bav = best(od)
-                lpos = pos.get(leg, 0)
-                if ba is not None and ba < fair[leg] - 1 and lpos < LIMIT:
-                    buy_cands.append((ba - fair[leg], leg, ba, bav, lpos))
-                if bb is not None and bb > fair[leg] + 1 and lpos > -LIMIT:
-                    sell_cands.append((bb - fair[leg], leg, bb, bbv, lpos))
 
-            buy_cands.sort()
-            sell_cands.sort(reverse=True)
-
-            for (_, bl, bpx, bvol, bpos), (_, sl, spx, svol, spos) in zip(buy_cands, sell_cands):
-                if bl == sl:
-                    continue
-                qty = min(bvol, svol, LIMIT - bpos, LIMIT + spos, 5)
-                if qty > 0:
-                    result[bl].append(Order(bl, bpx,  qty))
-                    result[sl].append(Order(sl, spx, -qty))
-
-        # ── 2) PEBBLES: passive quoting at implied fair ───────────────────────
-        for leg in PEBBLES:
-            if leg not in fair:
-                continue
-            od = state.order_depths.get(leg)
-            if od is None:
-                continue
-            passive_quote(result, leg, od, pos.get(leg, 0), fair[leg], 5)
-
-        # ── 3) SNACKPACK cointegration: CHOC + (−2.1259)·PIST + (−0.2320)·STRAW
-        coint_ods  = [state.order_depths.get(p) for p in SNACK_COINT]
-        coint_mids = [mid(o) if o is not None else None for o in coint_ods]
-        if all(m is not None for m in coint_mids):
-            spread_now = sum(b * m for b, m in zip(COINT_BETA, coint_mids))
-            spread_hist.append(spread_now)
-
-            if len(spread_hist) >= 30:
-                arr   = np.array(spread_hist)
-                mu_s  = float(np.mean(arr))
-                sigma = float(np.std(arr))
-
-                if sigma > 0:
-                    zscore = (spread_now - mu_s) / sigma
-                    if zscore > COINT_ENTER:
-                        targets = _SHORT_TGTS
-                    elif zscore < -COINT_ENTER:
-                        targets = _LONG_TGTS
-                    elif abs(zscore) < COINT_EXIT:
-                        targets = (0, 0, 0)
-                    else:
-                        targets = None
-
-                    if targets is not None:
-                        for prod, od_, tgt in zip(SNACK_COINT, coint_ods, targets):
-                            lpos = pos.get(prod, 0)
-                            delta = tgt - lpos
-                            if delta == 0 or od_ is None:
-                                continue
-                            bb, bbv, ba, bav = best(od_)
-                            if delta > 0 and ba is not None:
-                                qty = min(delta, bav, LIMIT - lpos)
-                                if qty > 0:
-                                    result[prod].append(Order(prod, ba, qty))
-                            elif delta < 0 and bb is not None:
-                                qty = min(-delta, bbv, LIMIT + lpos)
-                                if qty > 0:
-                                    result[prod].append(Order(prod, bb, -qty))
-
-        # ── 4) Penny-flatten all remaining products ───────────────────────────
-        for prod, od in state.order_depths.items():
-            if prod in _SPECIAL:
-                continue
-            if not od.buy_orders or not od.sell_orders:
+            bb = max(od.buy_orders)
+            ba = min(od.sell_orders)
+            book_spread = ba - bb
+            if book_spread <= 0:
                 continue
 
-            bb = max(od.buy_orders.keys())
-            ba = min(od.sell_orders.keys())
-            inner_bid = bb + 1
-            inner_ask = ba - 1
-            fair_val  = (inner_bid + inner_ask) / 2.0
-            edge      = (inner_ask - inner_bid) / 2.0
+            lpos = pos.get(sym, 0)
 
-            lpos = pos.get(prod, 0)
-            orders = []
+            # SNACKPACK: pair-trade logic sets target; CFG target_pos is fallback
+            if sym in SNACKPACK_PRODUCTS:
+                base_target = int(round(snack_target.get(sym, 0)))
+            else:
+                base_target = cfg["target_pos"]
 
-            take_o, lpos = penny_take(od, fair_val, edge, prod, lpos)
-            orders.extend(take_o)
-            clear_o, lpos = penny_clear(fair_val, prod, lpos)
-            orders.extend(clear_o)
-            make_o = penny_make(inner_bid, inner_ask, prod, lpos, bb, ba)
-            orders.extend(make_o)
+            # EWMA mean-reversion overlay: lean target against local deviation
+            prev = ewma_state.get(sym)
+            if prev is None:
+                ewma_m = fair
+                ewma_v = 0.0
+            else:
+                ewma_m = EWMA_ALPHA * prev["m"] + (1 - EWMA_ALPHA) * fair
+                ewma_v = EWMA_ALPHA * prev["v"] + (1 - EWMA_ALPHA) * (fair - ewma_m) ** 2
+            ewma_state[sym] = {"m": ewma_m, "v": ewma_v}
 
-            if orders:
-                result[prod].extend(orders)
+            mr_adj = 0.0
+            if ewma_v > MR_MIN_VAR:
+                z = (fair - ewma_m) / math.sqrt(ewma_v)
+                mr_adj = max(-MR_CAP, min(MR_CAP, -MR_K * z))
 
-        trader_data = json.dumps({
-            "spread_hist": list(spread_hist),
-            "prev_ts":     int(state.timestamp),
-        })
-        return result, 0, trader_data
+            target = max(-LIMIT, min(LIMIT, base_target + mr_adj))
+
+            # Inventory skew: shift fair so quotes lean toward closing gap to target
+            inv_shift   = cfg["inv_skew"] * (lpos - target) / LIMIT
+            skewed_fair = fair - inv_shift
+
+            half    = max(cfg["min_half"], book_spread / 4.0)
+            bid_px  = math.floor(skewed_fair - half)
+            ask_px  = math.ceil(skewed_fair + half)
+            if ask_px <= bid_px:
+                ask_px = bid_px + 1
+
+            buy_cap  = LIMIT - lpos
+            sell_cap = LIMIT + lpos
+            buy_qty  = min(cfg["size"], max(0, buy_cap))
+            sell_qty = min(cfg["size"], max(0, sell_cap))
+
+            ords: list[Order] = []
+
+            # Take-the-cross: eat resting orders priced through our skewed fair
+            ask_take = 0
+            if ba <= skewed_fair - half and buy_qty > 0:
+                avail    = abs(od.sell_orders[ba])
+                ask_take = min(avail, buy_qty)
+                if ask_take > 0:
+                    ords.append(Order(sym, ba, ask_take))
+
+            bid_take = 0
+            if bb >= skewed_fair + half and sell_qty > 0:
+                avail    = od.buy_orders[bb]
+                bid_take = min(avail, sell_qty)
+                if bid_take > 0:
+                    ords.append(Order(sym, bb, -bid_take))
+
+            # Passive quotes for remaining capacity
+            q_buy  = max(0, buy_qty  - ask_take)
+            q_sell = max(0, sell_qty - bid_take)
+            if q_buy  > 0:
+                ords.append(Order(sym, bid_px,  q_buy))
+            if q_sell > 0:
+                ords.append(Order(sym, ask_px, -q_sell))
+
+            if ords:
+                orders[sym] = ords
+
+        new_td = json.dumps(
+            {"ewma": ewma_state, "pairs": pair_state, "tick": tick},
+            separators=(",", ":"),
+        )
+        return orders, 0, new_td
