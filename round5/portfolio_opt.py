@@ -28,14 +28,14 @@ products = [
 # Mid-point estimates from news analysis
 returns = np.array([
     0.00,   # scoria paste
-    0.025,  # ashes of phoenix (2-3% → use 2.5%)
-   -0.60,   # lava cake
-    0.45,   # obsidian
+    -0.025,  # ashes of phoenix (2-3% → use 2.5%)
+   -0.65,   # lava cake
+    0.20,   # obsidian
     0.00,   # magma ink
    -0.10,   # pyroflex
-    0.20,   # thermolite
+    0.25,   # thermolite
     0.05,   # sulfur
-    0.08,   # volcanic incense
+    0.02,   # volcanic incense
 ])
 
 n = len(products)
