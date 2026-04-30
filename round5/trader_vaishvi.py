@@ -8,59 +8,54 @@ LIMIT = 10
 
 PEBBLES = ["PEBBLES_XS", "PEBBLES_S", "PEBBLES_M", "PEBBLES_L", "PEBBLES_XL"]
 
-# Johansen cointegrating vector (normalized to CHOCOLATE=1):
-#   CHOCOLATE + (−2.1259)*PISTACHIO + (−0.2320)*STRAWBERRY = stationary spread
+# Johansen cointegrating vector (normalized to CHOCOLATE=1)
 SNACK_COINT  = ("SNACKPACK_CHOCOLATE", "SNACKPACK_PISTACHIO", "SNACKPACK_STRAWBERRY")
 COINT_BETA   = (1.0, -2.1259, -0.2320)
-COINT_SCALE  = 4      # lot size multiplier — yields [+4, -8, -1] / [-4, +8, +1]
-COINT_WINDOW = 200    # rolling window for z-score
-COINT_ENTER  = 2.0    # open when |z| crosses this
-COINT_EXIT   = 0.5    # close when |z| falls below this
+COINT_SCALE  = 4
+COINT_WINDOW = 200
+COINT_ENTER  = 2.0
+COINT_EXIT   = 0.5
+_LONG_TGTS   = tuple(int(round(COINT_SCALE * b)) for b in COINT_BETA)   # (+4, -8, -1)
+_SHORT_TGTS  = tuple(-t for t in _LONG_TGTS)                             # (-4, +8, +1)
 
-# Pre-compute integer leg targets (rounded from COINT_SCALE * COINT_BETA)
-_LONG_TGTS  = tuple(int(round(COINT_SCALE * b)) for b in COINT_BETA)   # (+4, -8, -1)
-_SHORT_TGTS = tuple(-t for t in _LONG_TGTS)                             # (-4, +8, +1)
-
-GALAXY = [
-    "GALAXY_SOUNDS_DARK_MATTER",
-    "GALAXY_SOUNDS_BLACK_HOLES",
-    "GALAXY_SOUNDS_PLANETARY_RINGS",
-    "GALAXY_SOUNDS_SOLAR_WINDS",
-    "GALAXY_SOUNDS_SOLAR_FLAMES",
-]
-GALAXY_BH           = "GALAXY_SOUNDS_BLACK_HOLES"
-GALAXY_BH_BIAS      = 3     # persistent long target for BH (upward drift +34% over 3 days)
-GALAXY_SIGNAL_DECAY = 1000  # ticks before momentum signal expires
-
-MR_PRODUCTS = {
-    "ROBOT_DISHES": -0.23,
-    "ROBOT_IRONING": -0.13,
-    "OXYGEN_SHAKE_EVENING_BREATH": -0.12,
-    "OXYGEN_SHAKE_CHOCOLATE": -0.09,
+# Hold max position in products with consistent directional drift all 3 days
+DIRECTIONAL_HOLDS = {
+    "MICROCHIP_OVAL":            -10,  # -52.7% total, all 3 days ↓, accelerating
+    "UV_VISOR_AMBER":            -10,  # -31.5% total, all 3 days ↓
+    "PANEL_2X4":                 +10,  # +22.1% total, all 3 days ↑ (flattest drift)
+    "OXYGEN_SHAKE_GARLIC":       +10,  # +35.6% total, all 3 days ↑
+    "UV_VISOR_RED":              +10,  # +16.4% total, all 3 days ↑
+    "GALAXY_SOUNDS_BLACK_HOLES": +10,  # +31.4% total, all 3 days ↑
 }
 
-ALL_PRODUCTS = [
-    "GALAXY_SOUNDS_DARK_MATTER", "GALAXY_SOUNDS_BLACK_HOLES",
-    "GALAXY_SOUNDS_PLANETARY_RINGS", "GALAXY_SOUNDS_SOLAR_WINDS",
-    "GALAXY_SOUNDS_SOLAR_FLAMES",
-    "SLEEP_POD_SUEDE", "SLEEP_POD_LAMB_WOOL", "SLEEP_POD_POLYESTER",
-    "SLEEP_POD_NYLON", "SLEEP_POD_COTTON",
-    "MICROCHIP_CIRCLE", "MICROCHIP_OVAL", "MICROCHIP_SQUARE",
-    "MICROCHIP_RECTANGLE", "MICROCHIP_TRIANGLE",
-    *PEBBLES,
-    "ROBOT_VACUUMING", "ROBOT_MOPPING", "ROBOT_DISHES",
-    "ROBOT_LAUNDRY", "ROBOT_IRONING",
-    "UV_VISOR_YELLOW", "UV_VISOR_AMBER", "UV_VISOR_ORANGE",
-    "UV_VISOR_RED", "UV_VISOR_MAGENTA",
-    "TRANSLATOR_SPACE_GRAY", "TRANSLATOR_ASTRO_BLACK",
-    "TRANSLATOR_ECLIPSE_CHARCOAL", "TRANSLATOR_GRAPHITE_MIST",
-    "TRANSLATOR_VOID_BLUE",
-    "PANEL_1X2", "PANEL_2X2", "PANEL_1X4", "PANEL_2X4", "PANEL_4X4",
-    "OXYGEN_SHAKE_MORNING_BREATH", "OXYGEN_SHAKE_EVENING_BREATH",
-    "OXYGEN_SHAKE_MINT", "OXYGEN_SHAKE_CHOCOLATE", "OXYGEN_SHAKE_GARLIC",
-    "SNACKPACK_CHOCOLATE", "SNACKPACK_VANILLA", "SNACKPACK_PISTACHIO",
-    "SNACKPACK_STRAWBERRY", "SNACKPACK_RASPBERRY",
-]
+# Products that consistently lose on penny-flatten — skip entirely
+SKIP = {
+    "MICROCHIP_SQUARE",            # -83K
+    "PEBBLES_M",                   # -59K  (wide spread — basket arb still runs)
+    "PEBBLES_XS",                  # -52K
+    "ROBOT_VACUUMING",             # -35K
+    "SLEEP_POD_COTTON",            # -87K
+    "SLEEP_POD_SUEDE",             # -26K
+    "TRANSLATOR_ECLIPSE_CHARCOAL", # -15K
+    "UV_VISOR_MAGENTA",            # -55K
+    "UV_VISOR_YELLOW",             # -152K
+    "GALAXY_SOUNDS_DARK_MATTER",   # -33K
+    "GALAXY_SOUNDS_SOLAR_FLAMES",  # -11K
+    "PANEL_4X4",                   # -79K
+    "ROBOT_MOPPING",               # -23K
+    "SLEEP_POD_POLYESTER",         # -49K
+    "SNACKPACK_STRAWBERRY",        # -21K
+    "TRANSLATOR_GRAPHITE_MIST",    # -39K
+    "TRANSLATOR_SPACE_GRAY",       # -30K
+    "PANEL_2X2",                   # -8K
+    "ROBOT_DISHES",                # -5K
+    "ROBOT_LAUNDRY",               # -4K
+    "UV_VISOR_ORANGE",             # -5K
+}
+
+# Products handled by dedicated strategies — excluded from penny-flatten
+_SPECIAL = set(PEBBLES) | set(DIRECTIONAL_HOLDS) | set(SNACK_COINT) | SKIP
+
 
 def best(od: OrderDepth):
     bb = max(od.buy_orders)  if od.buy_orders  else None
@@ -78,7 +73,6 @@ def mid(od: OrderDepth):
 
 
 def passive_quote(result, prod, od, lpos, fair_val, size):
-    """Post passive buy/sell around fair_val strictly inside current spread."""
     bb, _, ba, _ = best(od)
     if bb is None or ba is None:
         return
@@ -90,6 +84,48 @@ def passive_quote(result, prod, od, lpos, fair_val, size):
         result[prod].append(Order(prod, want_sell, -min(size, LIMIT + lpos)))
 
 
+def penny_take(od, fair, edge, prod, pos):
+    """Phase 1: sweep book levels priced better than our inner quote."""
+    orders = []
+    for ask_px in sorted(od.sell_orders.keys()):
+        if ask_px >= fair - edge:
+            break
+        avail = -od.sell_orders[ask_px]
+        qty = min(avail, LIMIT - pos)
+        if qty > 0:
+            orders.append(Order(prod, ask_px, qty))
+            pos += qty
+    for bid_px in sorted(od.buy_orders.keys(), reverse=True):
+        if bid_px <= fair + edge:
+            break
+        avail = od.buy_orders[bid_px]
+        qty = min(avail, LIMIT + pos)
+        if qty > 0:
+            orders.append(Order(prod, bid_px, -qty))
+            pos -= qty
+    return orders, pos
+
+
+def penny_clear(fair, prod, pos):
+    """Phase 2: flatten inventory at fair value."""
+    if pos == 0:
+        return [], pos
+    return [Order(prod, int(round(fair)), -pos)], 0
+
+
+def penny_make(inner_bid, inner_ask, prod, pos, best_bid, best_ask):
+    """Phase 3: passive quotes at penny-improved prices, skipping the side
+    that would worsen an existing directional position."""
+    orders = []
+    skip_bid = pos > 0 and inner_bid >= best_bid
+    skip_ask = pos < 0 and inner_ask <= best_ask
+    if LIMIT - pos > 0 and not skip_bid:
+        orders.append(Order(prod, inner_bid,  LIMIT - pos))
+    if LIMIT + pos > 0 and not skip_ask:
+        orders.append(Order(prod, inner_ask, -(LIMIT + pos)))
+    return orders
+
+
 class Trader:
     def run(self, state: TradingState):
         try:
@@ -97,19 +133,33 @@ class Trader:
         except Exception:
             saved = {}
 
-        spread_hist        = deque(saved.get("spread_hist", []), maxlen=COINT_WINDOW)
-        galaxy_signal      = saved.get("galaxy_signal", 0)
-        galaxy_signal_age  = saved.get("galaxy_signal_age", 0)
+        spread_hist = deque(saved.get("spread_hist", []), maxlen=COINT_WINDOW)
 
-        # Detect new day (timestamp resets) — clear cross-day contamination
         prev_ts = saved.get("prev_ts", -1)
         if int(state.timestamp) < int(prev_ts):
             spread_hist.clear()
-            galaxy_signal     = 0
-            galaxy_signal_age = 0
 
         result: Dict[str, List[Order]] = {p: [] for p in state.order_depths}
         pos = state.position
+
+        # ── 0) Directional holds: reach target ASAP and hold ─────────────────
+        for prod, tgt in DIRECTIONAL_HOLDS.items():
+            od = state.order_depths.get(prod)
+            if od is None:
+                continue
+            lpos = pos.get(prod, 0)
+            delta = tgt - lpos
+            if delta == 0:
+                continue
+            bb, bbv, ba, bav = best(od)
+            if delta > 0 and ba is not None:
+                qty = min(delta, bav, LIMIT - lpos)
+                if qty > 0:
+                    result[prod].append(Order(prod, ba, qty))
+            elif delta < 0 and bb is not None:
+                qty = min(-delta, bbv, LIMIT + lpos)
+                if qty > 0:
+                    result[prod].append(Order(prod, bb, -qty))
 
         # ── 1) PEBBLES: delta-neutral aggressive arb ──────────────────────────
         peb_mids = {p: mid(state.order_depths[p])
@@ -142,7 +192,7 @@ class Trader:
                     result[bl].append(Order(bl, bpx,  qty))
                     result[sl].append(Order(sl, spx, -qty))
 
-        # ── 2) PEBBLES: passive quoting at implied fair ────────────────────────
+        # ── 2) PEBBLES: passive quoting at implied fair ───────────────────────
         for leg in PEBBLES:
             if leg not in fair:
                 continue
@@ -151,73 +201,7 @@ class Trader:
                 continue
             passive_quote(result, leg, od, pos.get(leg, 0), fair[leg], 5)
 
-        # ── 3) GALAXY SOUNDS: basket momentum + BH long bias ────────────────────
-        # A hidden basket agent always trades all 5 simultaneously (+/−6 from mid).
-        # After a basket BUY, prices continue up 1-2 per product for 500-10k ticks;
-        # after SELL, down 1-1.5. BH additionally has a persistent +34% upward drift.
-        galaxy_ods = {p: state.order_depths.get(p) for p in GALAXY}
-
-        # Detect basket event: all 5 products have market trades in the same direction
-        basket_dirs = []
-        for prod in GALAXY:
-            od  = galaxy_ods.get(prod)
-            trs = state.market_trades.get(prod, [])
-            if not trs or od is None:
-                basket_dirs.append(None)
-                continue
-            m = mid(od)
-            if m is None:
-                basket_dirs.append(None)
-                continue
-            total_vol = sum(abs(t.quantity) for t in trs)
-            vwap      = sum(t.price * abs(t.quantity) for t in trs) / total_vol
-            basket_dirs.append(1 if vwap > m else -1)
-
-        non_none = [d for d in basket_dirs if d is not None]
-        if len(non_none) == 5 and len(set(non_none)) == 1:
-            galaxy_signal     = non_none[0]
-            galaxy_signal_age = 0
-
-        # Age out stale signal
-        if galaxy_signal != 0:
-            galaxy_signal_age += 1
-            if galaxy_signal_age > GALAXY_SIGNAL_DECAY:
-                galaxy_signal     = 0
-                galaxy_signal_age = 0
-
-        for prod in GALAXY:
-            od = galaxy_ods.get(prod)
-            if od is None:
-                continue
-            lpos = pos.get(prod, 0)
-            bb, bbv, ba, bav = best(od)
-            if bb is None or ba is None:
-                continue
-            bh_bias = GALAXY_BH_BIAS if prod == GALAXY_BH else 0
-            if galaxy_signal == 1:
-                tgt = min(LIMIT, 7 + bh_bias)
-            elif galaxy_signal == -1:
-                tgt = max(-LIMIT, -7 + bh_bias)   # BH: -4, others: -7
-            else:
-                tgt = bh_bias                       # BH: hold +3, others: passive MM
-
-            delta = tgt - lpos
-            if delta > 0 and ba is not None:
-                qty = min(delta, bav, LIMIT - lpos)
-                if qty > 0:
-                    result[prod].append(Order(prod, ba, qty))
-            elif delta < 0 and bb is not None:
-                qty = min(-delta, bbv, LIMIT + lpos)
-                if qty > 0:
-                    result[prod].append(Order(prod, bb, -qty))
-            elif delta == 0:
-                m = mid(od)
-                if m is not None:
-                    passive_quote(result, prod, od, lpos, m, 2)
-
-        # ── 4) SNACKPACK cointegration: CHOC + (−2.1259)·PIST + (−0.2320)·STRAW ─
-        # Johansen cointegrating vector is stationary AR(1). Trade mean-reversion
-        # on the z-score: enter when |z| > COINT_ENTER, hold until |z| < COINT_EXIT.
+        # ── 3) SNACKPACK cointegration: CHOC + (−2.1259)·PIST + (−0.2320)·STRAW
         coint_ods  = [state.order_depths.get(p) for p in SNACK_COINT]
         coint_mids = [mid(o) if o is not None else None for o in coint_ods]
         if all(m is not None for m in coint_mids):
@@ -225,22 +209,20 @@ class Trader:
             spread_hist.append(spread_now)
 
             if len(spread_hist) >= 30:
-                arr = np.array(spread_hist)
-                mu    = float(np.mean(arr))
+                arr   = np.array(spread_hist)
+                mu_s  = float(np.mean(arr))
                 sigma = float(np.std(arr))
 
                 if sigma > 0:
-                    zscore = (spread_now - mu) / sigma
-
-                    # Determine target positions with hysteresis
+                    zscore = (spread_now - mu_s) / sigma
                     if zscore > COINT_ENTER:
-                        targets = _SHORT_TGTS   # spread high → short CHOC, long PIST/STRAW
+                        targets = _SHORT_TGTS
                     elif zscore < -COINT_ENTER:
-                        targets = _LONG_TGTS    # spread low  → long CHOC, short PIST/STRAW
+                        targets = _LONG_TGTS
                     elif abs(zscore) < COINT_EXIT:
-                        targets = (0, 0, 0)     # near mean → flatten
+                        targets = (0, 0, 0)
                     else:
-                        targets = None          # in between → hold current position
+                        targets = None
 
                     if targets is not None:
                         for prod, od_, tgt in zip(SNACK_COINT, coint_ods, targets):
@@ -258,50 +240,35 @@ class Trader:
                                 if qty > 0:
                                     result[prod].append(Order(prod, bb, -qty))
 
-        # ── 5) Mean-reversion MM for high negative-AR1 products ───────────────
-        for prod in MR_PRODUCTS:
-            if prod not in state.order_depths:
+        # ── 4) Penny-flatten all remaining products ───────────────────────────
+        for prod, od in state.order_depths.items():
+            if prod in _SPECIAL:
                 continue
-            od = state.order_depths[prod]
-            bb, bbv, ba, bav = best(od)
-            if bb is None or ba is None:
+            if not od.buy_orders or not od.sell_orders:
                 continue
-            spread = ba - bb
-            lpos = pos.get(prod, 0)
-            if spread > 2:
-                buy_px  = bb + 1
-                sell_px = ba - 1
-                if lpos < LIMIT - 3:
-                    result[prod].append(Order(prod, buy_px,  min(3, LIMIT - lpos)))
-                if lpos > -(LIMIT - 3):
-                    result[prod].append(Order(prod, sell_px, -min(3, LIMIT + lpos)))
 
-        # ── 6) Fallback spread-capture MM ─────────────────────────────────────
-        already = set(PEBBLES) | set(GALAXY) | set(SNACK_COINT) | set(MR_PRODUCTS)
-        for prod in ALL_PRODUCTS:
-            if prod in already or prod not in state.order_depths:
-                continue
-            od = state.order_depths[prod]
-            bb, _, ba, _ = best(od)
-            if bb is None or ba is None:
-                continue
-            spread = ba - bb
-            if spread <= 2:
-                continue
+            bb = max(od.buy_orders.keys())
+            ba = min(od.sell_orders.keys())
+            inner_bid = bb + 1
+            inner_ask = ba - 1
+            fair_val  = (inner_bid + inner_ask) / 2.0
+            edge      = (inner_ask - inner_bid) / 2.0
+
             lpos = pos.get(prod, 0)
-            buy_px  = bb + 1
-            sell_px = ba - 1
-            if lpos > 5:  buy_px  = bb
-            if lpos < -5: sell_px = ba
-            if lpos < LIMIT - 2:
-                result[prod].append(Order(prod, buy_px,  min(2, LIMIT - lpos)))
-            if lpos > -(LIMIT - 2):
-                result[prod].append(Order(prod, sell_px, -min(2, LIMIT + lpos)))
+            orders = []
+
+            take_o, lpos = penny_take(od, fair_val, edge, prod, lpos)
+            orders.extend(take_o)
+            clear_o, lpos = penny_clear(fair_val, prod, lpos)
+            orders.extend(clear_o)
+            make_o = penny_make(inner_bid, inner_ask, prod, lpos, bb, ba)
+            orders.extend(make_o)
+
+            if orders:
+                result[prod].extend(orders)
 
         trader_data = json.dumps({
-            "spread_hist":       list(spread_hist),
-            "galaxy_signal":     galaxy_signal,
-            "galaxy_signal_age": galaxy_signal_age,
-            "prev_ts":           int(state.timestamp),
+            "spread_hist": list(spread_hist),
+            "prev_ts":     int(state.timestamp),
         })
         return result, 0, trader_data
